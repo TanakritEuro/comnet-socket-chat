@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # so "import p
 
 from protocol import (
     BAD_REQUEST, HEADER, MAX_FRAME, TOO_LARGE,
-    ProtocolError, clean_name, dm_room, group_room, recv_msg, send_msg,
+    ProtocolError, clean_name, dm_partner, dm_room, group_room, recv_msg, send_msg,
 )
 
 
@@ -76,6 +76,10 @@ class HelperTests(unittest.TestCase):
     def test_dm_room_is_the_same_for_both_users(self):
         self.assertEqual(dm_room("bob", "alice"), "dm:alice|bob")
         self.assertEqual(dm_room("alice", "bob"), "dm:alice|bob")
+
+    def test_dm_partner(self):
+        self.assertEqual(dm_partner("dm:alice|bob", "alice"), "bob")
+        self.assertEqual(dm_partner("dm:alice|bob", "bob"), "alice")
 
     def test_group_room(self):
         self.assertEqual(group_room("netlab"), "group:netlab")

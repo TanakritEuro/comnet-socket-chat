@@ -141,6 +141,12 @@ def dm_room(a, b):
     return f"dm:{first}|{second}"
 
 
+def dm_partner(room, me):
+    """For a DM room id like "dm:alice|bob", return the name that isn't `me`."""
+    first, second = room.removeprefix("dm:").split("|")
+    return second if first == me else first
+
+
 def group_room(group):
     """Room id of a group chat."""
     return f"group:{group}"
