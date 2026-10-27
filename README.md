@@ -38,6 +38,20 @@ Suggested split (adjust as needed):
 
 Everyone should be able to explain R1–R11 in the Q&A, not just their own part.
 
+## Testing
+
+```bash
+python -m unittest discover -s tests -v     # headless: real server + raw-socket clients, no windows
+python scripts/e2e_gui_check.py             # opens 2 real client windows for a few seconds and clicks through R3-R11
+python scripts/e2e_gui_check.py --screenshot e2e.png   # same, plus a picture of both windows (Windows only)
+```
+
+`scripts/e2e_gui_check.py` starts a server on a free port, logs in `alice` and `bob` through the real login screen,
+connects a raw-socket `carol`, and drives the widgets in code: DM, create/join/leave a group, group message, a duplicate
+name, and a duplicate group. It checks what each window shows, and that `carol` (no GUI, not a member) gets no chat message at all.
+Message boxes are recorded instead of shown, so it never waits for a click. **Rerun it after every PR that touches
+`client.py` or the protocol**; it exits non-zero if any check fails. Don't move the mouse into the windows while it runs.
+
 ## Members
 
 | Student ID | Name | GitHub |
