@@ -30,6 +30,15 @@ All code so far was written by Claude Code (Opus 5.5) from these prompts. Each r
 >
 > […Stages 2–3…] Keep the code simple and commented: all 4 of us have to explain it live.
 
+**Prompt P2** (GUI client, PR `feat/tkinter-client`). This is the Stage 2 part of the same first prompt; the go-ahead came in a later message that merged PR #1:
+
+> STAGE 2: GUI client  (branch: feat/tkinter-client)
+> - client.py: login dialog (host, port, name, re-prompt on NAME_TAKEN), main window with an online
+>   users list ("(you)" marker) and a groups list showing members with Create/Join buttons, plus a
+>   ttk.Notebook with one tab per room (R5), each with a read-only chat window + entry box + Send (R6).
+>   Double-click a user to open a DM. Network receive thread → queue.Queue → root.after() polling.
+> - Update SLIDE_NOTES.md for R5, R6 and the client side of R7–R11. Open the PR.
+
 ## R1: System architecture
 - Diagram: _TODO (server, ≥2 client machines, LAN or cloud, Gemini API)_
 - Protocols (what / why / how):
@@ -67,7 +76,29 @@ All code so far was written by Claude Code (Opus 5.5) from these prompts. Each r
 - **AI prompt:** P1
 
 ## R5: Separate chat room per chat
+- **How:** Every room id gets its own tab in a `ttk.Notebook`. DM tabs are titled `@bob` (room id `dm:alice|bob`) and group tabs `#netlab`
+  (`group:netlab`). `open_room` creates a tab only the first time a room id is seen. Incoming messages are routed by their `room`
+  field, so a DM from a new person opens a new tab instead of mixing into another one.
+- **Code snapshot (mandatory):** `client.py` → `ChatApp.open_room` + `open_dm` + `open_group` (L327–345)
+- **Code snapshot 2:** `client.py` → `ChatApp.on_msg` (L299–309: route an incoming `MSG` to its room's tab)
+- **AI prompt:** P2
+
 ## R6: Chat box + chat window
+- **How:** Each `RoomTab` has a read-only `ScrolledText` chat window (`state="disabled"`, unlocked for a moment to append) and
+  an `Entry` + **Send** button (Enter also sends). Your own message appears when the server echoes it back, so what you
+  see is what the server actually delivered.
+- **Code snapshot (mandatory):** `client.py` → `RoomTab.__init__` (L109–128)
+- **Code snapshot 2:** `client.py` → `RoomTab.send` / `add_message` / `append` (L130–150)
+- **AI prompt:** P2
+
+## Client threading (R2 Q&A, and why the GUI never freezes)
+- One **receiver thread** blocks in `recv_msg()` and puts each message on a `queue.Queue`. The Tk main thread drains the
+  queue every 50 ms with `root.after()`. Only the main thread touches widgets, because Tkinter is not thread-safe.
+  The main thread sends directly. A TCP socket is full-duplex, so sending while another thread is in `recv()` is safe.
+- **Code snapshot:** `client.py` → `ChatApp.receive_loop` + `poll_inbox` (L213–238), module docstring diagram (L1–14)
+- **Login (R3 client side):** `LoginFrame.connect` (L55–96) opens the TCP connection, sends `HELLO`, and reads exactly one reply
+  frame. On `NAME_TAKEN` it shows an error and lets the user pick another name.
+- **AI prompt:** P2
 
 ## R7: Private message
 - **Server side:** For `DM {to, text}`, the server builds one `MSG` with room id `dm:<a>|<b>` (names sorted) and
@@ -77,7 +108,9 @@ All code so far was written by Claude Code (Opus 5.5) from these prompts. Each r
 - **Code snapshot 2:** `protocol.py` → `dm_room` (L138–141)
 - **Proof:** `tests/test_server.py` → `test_dm_reaches_only_sender_and_recipient` (a third client, carol, receives nothing)
 - **AI prompt:** P1
-- **Client side:** _TODO (Stage 2)_
+- **Client side:** Double-click a name in the user list → `open_dm` opens the `@name` tab, and Send sends `DM {to, text}`.
+  The client never decides who sees a message; it only shows the `MSG` frames the server sends it.
+  Snapshot: `client.py` → `on_user_double_click` (L357–360), `open_dm` (L337–340), `on_msg` (L299–309). AI prompt: P2
 
 ## R8: Create group (creator is only member)
 - **Server side:** `GROUP_CREATE` stores `{"creator": name, "members": [name]}`, so the only member is the creator. The server then
@@ -85,7 +118,8 @@ All code so far was written by Claude Code (Opus 5.5) from these prompts. Each r
 - **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_group_create` (L228–238)
 - **Proof:** `tests/test_server.py` → `R8CreateGroupTests` (L190–209)
 - **AI prompt:** P1
-- **Client side:** _TODO (Stage 2)_
+- **Client side:** **Create…** asks for a name and sends `GROUP_CREATE`. The `#group` tab opens when the server's `GROUPS`
+  update shows us as a member. Snapshot: `client.py` → `create_group` (L380–389). AI prompt: P2
 
 ## R9: List all groups with members
 - **Server side:** `groups_message` builds the list of every group with its creator and members. It is broadcast after
@@ -93,7 +127,9 @@ All code so far was written by Claude Code (Opus 5.5) from these prompts. Each r
 - **Code snapshot (mandatory):** `server.py` → `ChatServer.groups_message` + `broadcast_groups` (L151–163)
 - **Proof:** `tests/test_server.py` → `R9GroupListTests` (L212–230)
 - **AI prompt:** P1
-- **Client side:** _TODO (Stage 2)_
+- **Client side:** A `ttk.Treeview` shows each group as a parent row (`netlab (2 members) ✓ joined`) with its members
+  underneath, marked `(you)` and `(creator)`. It's rebuilt on every `GROUPS` message, so it updates live.
+  Snapshot: `client.py` → `ChatApp.on_groups` (L274–297). AI prompt: P2
 
 ## R10: Join group by yourself
 - **Server side:** `GROUP_JOIN` has only a `group` field. The server appends the name tied to **this connection**,
@@ -102,7 +138,9 @@ All code so far was written by Claude Code (Opus 5.5) from these prompts. Each r
 - **Code snapshot 2:** `server.py` → `handle_group_leave` (L254–265)
 - **Proof:** `tests/test_server.py` → `test_join_adds_only_the_sender`
 - **AI prompt:** P1
-- **Client side:** _TODO (Stage 2)_
+- **Client side:** Select a group, then **Join** (or double-click it and confirm). The `GROUP_JOIN` message has only a `group`
+  field, so there is no way to name someone else. **Leave** sends `GROUP_LEAVE` and closes the tab.
+  Snapshot: `client.py` → `join_group` / `leave_group` (L391–400), `on_group_double_click` (L371–378). AI prompt: P2
 
 ## R11: Group message (members only)
 - **Server side:** For `GROUP_MSG`, the server first checks that the sender is in the member list. If not, it replies `ERROR NOT_MEMBER`
@@ -111,7 +149,9 @@ All code so far was written by Claude Code (Opus 5.5) from these prompts. Each r
 - **Proof:** `tests/test_server.py` → `R11GroupMessageTests` (L265–297): non-members get nothing, a non-member's message is rejected and
   reaches nobody, and a member who left stops receiving
 - **AI prompt:** P1
-- **Client side:** _TODO (Stage 2)_
+- **Client side:** A group tab's Send sends `GROUP_MSG {group, text}`. Group tabs exist only for groups you're in, and
+  even a modified client can't read a group it isn't in, because the server only sends to members.
+  Snapshot: `client.py` → `open_group` (L342–345). AI prompt: P2
 
 ## Q&A prep: concurrency
 - One thread per client (`serve_forever` → `threading.Thread(target=handle_client)`), and one `threading.Lock` guards
