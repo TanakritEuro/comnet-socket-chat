@@ -39,13 +39,45 @@ All code so far was written by Claude Code (Opus 5.5) from these prompts. Each r
 >   Double-click a user to open a DM. Network receive thread → queue.Queue → root.after() polling.
 > - Update SLIDE_NOTES.md for R5, R6 and the client side of R7–R11. Open the PR.
 
+**Prompt P3** (architecture docs, PR `docs/architecture`). This is the Stage 3 part of the same first prompt; the go-ahead came
+in the message that merged PR #2:
+
+> STAGE 3: R1 docs  (branch: docs/architecture)
+> - Architecture diagram (Mermaid in docs/ARCHITECTURE.md, also rendered to PNG if mmdc/npx is available)
+>   showing the server and ≥2 client PCs on the LAN, plus the HTTPS call to Gemini.
+> - Explanation of each protocol (TCP, IP, our app protocol, JSON, HTTPS/TLS): what, why, and how it is used here.
+> - README "How to demo on 2+ computers" section (find the server IP with ipconfig, Windows firewall inbound rule for the port).
+> - Open the PR.
+
 ## R1: System architecture
-- Diagram: _TODO (server, ≥2 client machines, LAN or cloud, Gemini API)_
-- Protocols (what / why / how):
-  - TCP: _TODO_
-  - IP (IPv4, LAN / Internet): _TODO_
-  - Custom application protocol (length-prefixed JSON, see PROTOCOL.md): _TODO_
-  - HTTPS (TLS over TCP) to the Gemini API: _TODO_
+Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides are in [`docs/diagrams/`](diagrams/)
+(re-render with `python scripts/render_diagrams.py` after editing the Mermaid blocks).
+
+- **Slide "R1: Architecture diagram":** `diagrams/deployment.png`. Talking points: one `server.py` and one `client.py` per user on
+  ≥2 physical PCs on the same LAN. Each client keeps **one TCP connection** to `server-IP:5050`, and clients never talk to each
+  other directly, so the server enforces every privacy rule. Only the server calls Gemini, over HTTPS, so the API key
+  stays on the server.
+  The yellow note on the slide: the server can also run on one of the client PCs. The Gemini arrows (① request, ② summary) are
+  the planned Special 1 call.
+  - Backup slides / Q&A (all PNGs are rendered at 2x scale, so they stay sharp on a projector):
+    - `diagrams/threads-server.png`: one thread per client, one lock. The dashed arrow shows *alice's* thread writing to
+      *bob's* socket, which is why sends need the lock.
+    - `diagrams/threads-client.png`: receiver thread → `queue.Queue` → Tk main thread.
+    - `diagrams/sequence-dm.png`: handshake, login (R3, R4), a DM to two sockets only (R7), and a non-member's group message
+      rejected (R11).
+    - `diagrams/sequence-groups.png`: create (only the creator is a member, R8) → `GROUPS` to everyone (R9) → bob joins
+      himself (R10) → bob's group message reaches alice and bob only (R11).
+- **Slide "R1: Protocols" (what / why / how):** one line each. Details are in ARCHITECTURE.md §4.
+  - **TCP:** reliable, ordered byte stream. *Why:* chat messages must not be lost or reordered, and an open connection
+    means "online" (FIN/RST → user list update). *How:* `socket(AF_INET, SOCK_STREAM)`, `bind/listen/accept` on the server, `create_connection` on the client.
+  - **IP (IPv4):** addresses and routes packets between the PCs. *Why:* that's how separate machines find each other; IPv4 is what `ipconfig`
+    and the LAN give us. *How:* the user types the server's IP; the server binds `0.0.0.0:5050`; IP + port = socket address.
+  - **Our application protocol:** 4-byte big-endian length + UTF-8 JSON, with a `type` field. *Why:* TCP has no message
+    boundaries; a length prefix is safe for any content and lets us reject huge frames. *How:* `send_msg` / `recv_msg` with a looped `recv_exact`.
+  - **JSON:** *Why:* readable in Wireshark, easy to extend, built into Python, same format as the Gemini API. *How:* `json.dumps(..., ensure_ascii=False)`.
+  - **HTTPS (HTTP over TLS):** encrypted, authenticated connection to Gemini on TCP 443. *Why:* it protects the API key and chat text, and Google
+    requires it. *How (planned, Special 1):* `urllib.request` POST from the server only.
+- **AI prompt:** P3
 
 ## R2: Socket programming only
 - **How:** All chat traffic goes over one plain TCP socket per client (`socket.AF_INET`, `SOCK_STREAM`) from the
