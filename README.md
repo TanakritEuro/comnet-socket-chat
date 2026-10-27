@@ -4,6 +4,7 @@ A simple chat application built on raw TCP sockets (Python stdlib) with a Tkinte
 Private chats, group chats, AI chat summarization, file sharing, chat history, and typing indicators.
 
 - Requirements: [`docs/SPEC.md`](docs/SPEC.md)
+- Architecture + protocols (R1): [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - Wire protocol: [`docs/PROTOCOL.md`](docs/PROTOCOL.md)
 - Slide material: [`docs/SLIDE_NOTES.md`](docs/SLIDE_NOTES.md)
 - Presentation: **Mon 9 Nov 2026**
@@ -20,6 +21,77 @@ python server.py --host 0.0.0.0 --port 5050
 # each client machine
 python client.py            # enter the server's IP, port 5050, and a unique name
 ```
+
+## How to demo on 2+ computers
+
+R1 requires **at least two clients on different physical computers**. The server can run on a third PC or on one of them.
+Architecture and protocol explanation: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+**0. Same network.** Put every PC on the same Wi-Fi or LAN. Some campus or public Wi-Fi networks use *client isolation*,
+which blocks connections between laptops. If step 4 fails with no firewall problem, switch everyone to a **phone hotspot**.
+
+**1. Find the server's IP address** (on the server PC):
+
+```powershell
+ipconfig
+```
+
+Use the `IPv4 Address` under your **Wi-Fi** (or Ethernet) adapter, e.g. `192.168.1.20`. Ignore `vEthernet (WSL)`,
+`VirtualBox`, `VMware` and `169.254.x.x` addresses. `server.py` also prints all of this PC's addresses when it starts.
+
+**2. Allow the port through Windows Firewall** (on the server PC, in PowerShell **as Administrator**):
+
+```powershell
+Get-NetConnectionProfile    # NetworkCategory = Private or Public?
+New-NetFirewallRule -DisplayName "Socket Chat 5050" -Direction Inbound -Protocol TCP -LocalPort 5050 -Action Allow -Profile Private,Public
+```
+
+- When Windows asks "Allow Python to communicate on these networks?", click **Allow**.
+- If someone once clicked **Cancel** on that prompt, Windows created a **block** rule for `python.exe`, and block rules beat
+  allow rules. Remove it under *Windows Defender Firewall → Allow an app through firewall* (or *Advanced settings → Inbound
+  Rules*, look for `python` with a red icon).
+- After the demo, remove the rule: `Remove-NetFirewallRule -DisplayName "Socket Chat 5050"`.
+
+**3. Start the server** (on the server PC):
+
+```powershell
+python server.py --host 0.0.0.0 --port 5050
+```
+
+**4. Check that a client PC can reach it** (on each client PC):
+
+```powershell
+Test-NetConnection 192.168.1.20 -Port 5050    # use the server's IP from step 1
+```
+
+`TcpTestSucceeded : True` means the TCP handshake worked. `False` means a firewall, the wrong IP, or client isolation (see step 0).
+
+**5. Start the clients** (on each client PC):
+
+```powershell
+python client.py --host 192.168.1.20 --name alice     # or just: python client.py, and type them in
+```
+
+**Suggested demo order** (one requirement per step):
+
+| Step | Shows |
+|---|---|
+| Log in alice (PC 1) and bob (PC 2); point at the user lists | R1, R2, R4 (own name marked "(you)") |
+| Try to log in a second "alice" | R3 (error, re-prompt) |
+| alice double-clicks bob and sends a DM; carol (3rd client) sees nothing | R5, R6, R7 |
+| bob clicks **Create…** → `netlab`; everyone sees it with only bob in it | R8, R9 |
+| alice selects `netlab` → **Join**; member lists update everywhere | R9, R10 |
+| alice and bob chat in `#netlab`; carol (not a member) sees nothing | R11 |
+| Optional: Wireshark on the server PC with filter `tcp.port == 5050` | TCP handshake, 4-byte length + JSON on the wire |
+
+**Troubleshooting**
+
+| Symptom | Likely cause |
+|---|---|
+| "timed out" on Connect | Firewall on the server PC (step 2), wrong IP, or Wi-Fi client isolation (step 0) |
+| "actively refused" / "connection refused" | Server not running, or a different port |
+| Works on the server PC itself (`localhost`) but not from another PC | Firewall, or you used a virtual adapter's IP |
+| `ModuleNotFoundError: No module named 'tkinter'` | Python was installed without Tcl/Tk. Reinstall from python.org with "tcl/tk and IDLE" ticked |
 
 ## Team workflow
 
