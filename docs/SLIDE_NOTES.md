@@ -57,8 +57,16 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   ≥2 physical PCs on the same LAN. Each client keeps **one TCP connection** to `server-IP:5050`, and clients never talk to each
   other directly, so the server enforces every privacy rule. Only the server calls Gemini, over HTTPS, so the API key
   stays on the server.
-  - Backup slides / Q&A: `diagrams/threads-server.png` (thread per client + one lock), `diagrams/threads-client.png`
-    (receiver thread → queue → Tk thread), `diagrams/sequence.png` (login, DM, rejected group message).
+  The yellow note on the slide: the server can also run on one of the client PCs. The Gemini arrows (① request, ② summary) are
+  the planned Special 1 call.
+  - Backup slides / Q&A (all PNGs are rendered at 2x scale, so they stay sharp on a projector):
+    - `diagrams/threads-server.png`: one thread per client, one lock. The dashed arrow shows *alice's* thread writing to
+      *bob's* socket, which is why sends need the lock.
+    - `diagrams/threads-client.png`: receiver thread → `queue.Queue` → Tk main thread.
+    - `diagrams/sequence-dm.png`: handshake, login (R3, R4), a DM to two sockets only (R7), and a non-member's group message
+      rejected (R11).
+    - `diagrams/sequence-groups.png`: create (only the creator is a member, R8) → `GROUPS` to everyone (R9) → bob joins
+      himself (R10) → bob's group message reaches alice and bob only (R11).
 - **Slide "R1: Protocols" (what / why / how):** one line each. Details are in ARCHITECTURE.md §4.
   - **TCP:** reliable, ordered byte stream. *Why:* chat messages must not be lost or reordered, and an open connection
     means "online" (FIN/RST → user list update). *How:* `socket(AF_INET, SOCK_STREAM)`, `bind/listen/accept` on the server, `create_connection` on the client.

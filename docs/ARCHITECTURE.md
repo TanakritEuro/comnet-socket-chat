@@ -18,15 +18,21 @@ flowchart LR
         direction LR
         A["Client PC 1<br/>python client.py<br/>Tkinter GUI<br/>e.g. 192.168.1.21"]
         B["Client PC 2<br/>python client.py<br/>Tkinter GUI<br/>e.g. 192.168.1.22"]
-        S["Server PC<br/>python server.py --port 5050<br/>e.g. 192.168.1.20"]
-        A <-->|"TCP connection to 192.168.1.20:5050<br/>length-prefixed JSON frames"| S
-        B <-->|"TCP connection to 192.168.1.20:5050"| S
+        S["Server PC<br/>python server.py<br/>--port 5050<br/>e.g. 192.168.1.20"]
+        N["Note: the server can<br/>also run on one of<br/>the client PCs. That PC<br/>then runs both<br/>server.py and client.py."]
+        A <-->|"TCP to 192.168.1.20:5050<br/>length-prefixed<br/>JSON frames"| S
+        B <-->|"TCP to 192.168.1.20:5050<br/>length-prefixed<br/>JSON frames"| S
+        S ~~~ N
     end
     G["Google Gemini API<br/>generativelanguage.googleapis.com"]
-    S -->|"HTTPS = HTTP over TLS over TCP :443<br/>summarize request (planned, Special 1)"| G
+    S -->|"① HTTPS request<br/>TLS over TCP :443<br/>chat text to summarize"| G
+    G -->|"② HTTPS response<br/>summary text"| S
+    classDef note fill:#fff8c4,stroke:#b8a23a,stroke-dasharray:4 3,color:#333
+    class N note
 ```
 
 - The IP addresses are examples. On the day, read the server's address from `ipconfig` (see the README's demo section).
+- The Gemini call (①, ②) is **planned** for Special 1 and isn't implemented yet.
 - The server listens on `0.0.0.0:5050`, which means "port 5050 on every network interface of this PC".
 - Only the **server** talks to Gemini, so the API key never leaves the server machine.
 
@@ -38,10 +44,11 @@ flowchart LR
 ```mermaid
 flowchart LR
     L(["listening socket<br/>0.0.0.0:5050"]) --> ACC["main thread<br/>serve_forever()<br/>loop: accept()"]
-    ACC -->|"new socket +<br/>new thread"| T1["alice's thread<br/>handle_client()<br/>recv_msg() on alice's socket"]
-    ACC -->|"new socket +<br/>new thread"| T2["bob's thread<br/>handle_client()<br/>recv_msg() on bob's socket"]
+    ACC -->|"new socket +<br/>new thread"| T1["alice's thread<br/>handle_client()<br/>recv_msg() on<br/>alice's socket"]
+    ACC -->|"new socket +<br/>new thread"| T2["bob's thread<br/>handle_client()<br/>recv_msg() on<br/>bob's socket"]
     T1 <-->|"with lock"| ST[("shared state<br/>clients: name → socket<br/>groups: name → members")]
     T2 <-->|"with lock"| ST
+    T1 -.->|"send_msg() to bob's socket<br/>(while holding lock)"| BS(["bob's socket<br/>(TCP to bob's PC)"])
 ```
 
 **Client (`client.py`, one per user):**
@@ -57,15 +64,18 @@ flowchart LR
 
 - **Server:** `accept()` returns a new socket for each client. Each socket gets its own thread, which blocks in `recv()` on
   that client only. All threads share the `clients` and `groups` dictionaries, so one `threading.Lock` protects them.
-- **Any** server thread may write to a client's socket. When bob sends alice a DM, it's *bob's* thread that writes to *alice's*
-  socket. So sends also happen under the lock; otherwise two threads could interleave the bytes of two frames on one socket.
+- **Any** server thread may write to a client's socket (the dashed arrow). When alice sends bob a DM, it's *alice's* thread that
+  writes to *bob's* socket, while bob's own thread may be writing to it at the same moment. So sends also happen under the
+  lock; otherwise two threads could interleave the bytes of two frames on one socket.
 - **Client:** Tkinter is not thread-safe, so only the main thread touches widgets. The receiver thread just
   blocks in `recv()` and puts messages on a queue, which the main thread drains with `root.after()`. The GUI never freezes
   while waiting for the network.
 
-## 3. One conversation, message by message
+## 3. Conversations, message by message
 
-<!-- diagram: sequence -->
+**Login, a private message, and a rejected group message** (R3, R4, R7, R11):
+
+<!-- diagram: sequence-dm -->
 ```mermaid
 sequenceDiagram
     participant A as alice (client.py)
@@ -81,9 +91,35 @@ sequenceDiagram
     S-->>A: MSG {room: "dm:alice|bob", from: "alice", text: "hi"}
     S-->>B: MSG {room: "dm:alice|bob", from: "alice", text: "hi"}
     Note over C: carol receives nothing (R7)
-    C->>S: GROUP_MSG {group: "netlab", text: "..."} (carol is not a member)
-    S-->>C: ERROR {code: "NOT_MEMBER"}
+    Note over S: netlab members: alice, bob
+    C->>S: GROUP_MSG netlab
+    S-->>C: ERROR NOT_MEMBER
     Note over A,B: nobody receives carol's message (R11)
+```
+
+**Creating, joining and messaging a group** (R8–R11). All three users are already logged in:
+
+<!-- diagram: sequence-groups -->
+```mermaid
+sequenceDiagram
+    participant A as alice (client.py)
+    participant S as server.py
+    participant B as bob (client.py)
+    participant C as carol (client.py)
+    A->>S: GROUP_CREATE {group: "netlab"}
+    Note over S: R8: the creator is the only member
+    S-->>A: GROUPS netlab: [alice]
+    S-->>B: GROUPS netlab: [alice] (R9: everyone sees every group)
+    S-->>C: GROUPS netlab: [alice]
+    B->>S: GROUP_JOIN {group: "netlab"}
+    Note over S: R10: adds the sender (bob) only
+    S-->>A: GROUPS netlab: [alice, bob]
+    S-->>B: GROUPS netlab: [alice, bob]
+    S-->>C: GROUPS netlab: [alice, bob]
+    B->>S: GROUP_MSG {group: "netlab", text: "hi all"}
+    S-->>A: MSG {room: "group:netlab", from: "bob", text: "hi all"}
+    S-->>B: MSG {room: "group:netlab", from: "bob", text: "hi all"}
+    Note over C: carol is not a member: gets nothing (R11)
 ```
 
 ## 4. Protocols: what, why, how

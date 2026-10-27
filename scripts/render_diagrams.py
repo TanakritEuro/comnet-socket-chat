@@ -45,13 +45,27 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         config = Path(tmp) / "puppeteer.json"
         config.write_text(json.dumps({"executablePath": browser} if browser else {}))
+        # useMaxWidth=False: draw each diagram at its natural size instead of shrinking it to
+        # fit mermaid-cli's 800 px page; "-s 2" below then doubles it for sharp slides.
+        # One font everywhere, so the text Mermaid measures is the text it draws (otherwise
+        # notes overflow their boxes).
+        font = "Arial, Helvetica, sans-serif"
+        mermaid_config = Path(tmp) / "mermaid.json"
+        mermaid_config.write_text(json.dumps({
+            "fontFamily": font,
+            "themeVariables": {"fontFamily": font},
+            "flowchart": {"useMaxWidth": False},
+            "sequence": {"useMaxWidth": False, "actorFontFamily": font,
+                         "noteFontFamily": font, "messageFontFamily": font},
+        }))
         for name, code in diagrams:
             src = Path(tmp) / f"{name}.mmd"
             src.write_text(code, encoding="utf-8")
             out = OUT_DIR / f"{name}.png"
             print(f"rendering {out.relative_to(REPO)}")
             subprocess.run([npx, "-y", MERMAID_CLI, "-i", str(src), "-o", str(out),
-                            "-b", "white", "-s", "2", "-p", str(config)], check=True, env=env)
+                            "-b", "white", "-s", "2", "-c", str(mermaid_config), "-p", str(config)],
+                           check=True, env=env)
 
 
 if __name__ == "__main__":
