@@ -7,6 +7,7 @@
 ## Checklist
 - [ ] Branch is not `main`; PR targets `main`
 - [ ] `python -m unittest discover -s tests -v` passes
+- [ ] `python scripts/e2e_gui_check.py` passes (if `client.py` or the protocol changed)
 - [ ] Tried with at least 2 clients (ideally on 2 machines)
 - [ ] `docs/PROTOCOL.md` updated if any message type changed
 - [ ] `docs/SLIDE_NOTES.md` updated (explanation, code snapshot location, AI prompt used)

@@ -51,6 +51,7 @@ The server and client **must be separate files** (spec requirement).
 python server.py --host 0.0.0.0 --port 5050          # on the server machine
 python client.py                                     # on each client machine; login dialog asks for host/port/name
 python -m unittest discover -s tests -v              # headless tests (start no GUI)
+python scripts/e2e_gui_check.py                      # GUI end-to-end check: 2 real windows; rerun after client/protocol changes
 ```
 
 Copy `.env.example` to `.env` and set `GEMINI_API_KEY` on the server machine only. Never commit `.env`.

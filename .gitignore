@@ -13,6 +13,7 @@ downloads/
 received_files/
 history.json
 *.log
+e2e*.png
 
 # OS / editors
 .DS_Store
