@@ -42,6 +42,10 @@ TCP is a byte stream with no message boundaries, so every message is framed like
 | `TYPING` | `room`, `on` (bool) | Forwarded to the other room participants |
 | `FILE` | `room`, `filename`, `size`, `data` (base64) | Same routing/privacy rules as text. Max 5 MiB raw |
 | `SUMMARIZE` | `room` | AI summary of a room you can read: your own DM, or a group you're a member of (special 1). Uses the server's buffer (last 50 messages; for a group, only those sent after you joined). Errors: `BAD_REQUEST` (not a room id), `NO_SUCH_GROUP`, `NOT_MEMBER`, `BUSY` (your previous summary isn't finished) |
+| `TRANSLATE` | `room`, `ts`, `to` | Translate **one message** (special: translation). The message is named by its room and its server timestamp `ts`; the server finds it in the [message buffer](#message-buffer) and checks you may read that room, so a client cannot make the server translate arbitrary text. `to` is a language code: `en`, `th`, `ja`, `zh` or `es`. Errors: `BAD_REQUEST`, `NO_SUCH_GROUP`, `NOT_MEMBER`, `NO_SUCH_MESSAGE`, `AI_FAILED` |
+| `SENTIMENT` | `room`, `ts` | Analyze the mood of **one message**, named the same way as in `TRANSLATE`. Errors: `BAD_REQUEST`, `NO_SUCH_GROUP`, `NOT_MEMBER`, `NO_SUCH_MESSAGE` (and `AI_FAILED` if there is no offline fallback) |
+| `BOT_ASK` | `text`, optional `room` | Ask the chatbot. The server keeps the last 10 question/answer pairs of **this connection** as context. If `room` is given, that room's recent messages are added as context, after the same readability check as `SUMMARIZE`. Errors: `BAD_REQUEST` (blank text, bad `room`), `NOT_MEMBER`, `BUSY` (previous question not answered yet) |
+| `BOT_CLEAR` | | Forget this connection's chatbot conversation. No reply |
 | `BYE` | | optional clean disconnect |
 
 ## Server → Client
@@ -57,12 +61,22 @@ TCP is a byte stream with no message boundaries, so every message is framed like
 | `HISTORY` | `room`, `messages: [MSG or FILE objects]` | Group history only includes messages from after the requester joined |
 | `TYPING` | `room`, `from`, `on` | |
 | `SUMMARY` | `room`, `text`, `model` | Sent **only to the requester**, usually a few seconds later. `model` = the Gemini model that answered (e.g. `gemini-3-flash-preview`) or `"offline"` when no AI was used (no key, no messages, or every model failed) |
+| `TRANSLATION` | `room`, `ts`, `to`, `source`, `text`, `model` | Sent **only to the requester**. `room` + `ts` name the original message, `source` is the detected language code (e.g. `th`), `text` the translation, `model` the Gemini model that answered |
+| `SENTIMENT_RESULT` | `room`, `ts`, `label`, `model` | Sent **only to the requester**. `label` is `positive`, `neutral` or `negative`. `model` is `"offline"` if a simple fallback was used instead of AI |
+| `BOT_REPLY` | `text`, `model`, `ts` | Sent **only to the asker**. `model` is `"offline"` with an explanatory `text` when no API key is set, so the demo never breaks |
 | `NOTICE` | `text` | e.g. "bob joined", "bob left" |
 
 Before `WELCOME`, any message other than `HELLO` gets `ERROR BAD_REQUEST`. An unknown `type` after login also gets
 `ERROR BAD_REQUEST`, but the connection stays open.
 
-**Status:** `SUMMARIZE` / `SUMMARY` are implemented. `HISTORY`, `TYPING`, `FILE` and `NOTICE` are Part 3 and not implemented
+`ERROR` may carry three optional fields when it answers an AI request, so the client can reset the right control:
+`request` (the type that failed, e.g. `"TRANSLATE"`), and for per-message requests `room` and `ts` as in the request.
+
+The chatbot is **not a room**: `BOT_ASK` / `BOT_REPLY` never use a room id, are never written to the message buffer
+and are never sent to anyone but the asker. UI and per-feature details: [`AI_FEATURES.md`](AI_FEATURES.md).
+
+**Status:** `SUMMARIZE` / `SUMMARY` are implemented. `TRANSLATE`, `SENTIMENT`, `BOT_ASK` and `BOT_CLEAR` with their
+replies are **specified here but not implemented yet**; until then the server answers them with `ERROR BAD_REQUEST`. `HISTORY`, `TYPING`, `FILE` and `NOTICE` are Part 3 and not implemented
 yet; the server currently answers them with `ERROR BAD_REQUEST`.
 
 ## Message buffer
@@ -96,7 +110,9 @@ messages, and someone who reconnects with the same name is still in their groups
 | `ALREADY_MEMBER` | `GROUP_JOIN` on a group you're already in |
 | `NOT_MEMBER` | `GROUP_MSG` or `GROUP_LEAVE` on a group you're not in, or `SUMMARIZE` of a room you can't read |
 | `TOO_LARGE` | frame over 10 MiB (connection is closed) |
-| `BUSY` | `SUMMARIZE` while your previous summary is still being prepared |
+| `BUSY` | `SUMMARIZE` while your previous summary is still being prepared, or `BOT_ASK` while the previous question is unanswered |
+| `NO_SUCH_MESSAGE` | `TRANSLATE` / `SENTIMENT` for a `ts` that is not in the room's buffer (older than the last 50, sent before you joined, or never existed) |
+| `AI_FAILED` | The AI call for `TRANSLATE`, `SENTIMENT` or `BOT_ASK` failed (no API key, quota used up, network error) and there is no fallback answer |
 
 ## Example session
 
@@ -111,6 +127,12 @@ C→S  {"type":"DM","to":"bob","text":"hi"}
 S→alice,bob  {"type":"MSG","room":"dm:alice|bob","from":"alice","text":"hi","ts":1793066669.5}
 C→S  {"type":"SUMMARIZE","room":"dm:alice|bob"}
 S→alice  {"type":"SUMMARY","room":"dm:alice|bob","text":"- alice greeted bob","model":"gemini-3-flash-preview"}
+C→S  {"type":"TRANSLATE","room":"dm:alice|bob","ts":1793066669.5,"to":"th"}
+S→alice  {"type":"TRANSLATION","room":"dm:alice|bob","ts":1793066669.5,"to":"th","source":"en","text":"สวัสดี","model":"gemini-3-flash-preview"}
+C→S  {"type":"SENTIMENT","room":"dm:alice|bob","ts":1793066669.5}
+S→alice  {"type":"SENTIMENT_RESULT","room":"dm:alice|bob","ts":1793066669.5,"label":"positive","model":"gemini-3-flash-preview"}
+C→S  {"type":"BOT_ASK","text":"How does TCP framing work?"}
+S→alice  {"type":"BOT_REPLY","text":"TCP is a byte stream, so ...","model":"gemini-3-flash-preview","ts":1793066700.1}
 ```
 
 ## Security note (for the Q&A)

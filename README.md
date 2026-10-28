@@ -6,6 +6,7 @@ Private chats, group chats, AI chat summarization, file sharing, chat history, a
 - Requirements: [`docs/SPEC.md`](docs/SPEC.md)
 - Architecture + protocols (R1): [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - Wire protocol: [`docs/PROTOCOL.md`](docs/PROTOCOL.md)
+- AI features (UI + who builds what): [`docs/AI_FEATURES.md`](docs/AI_FEATURES.md)
 - Slide material: [`docs/SLIDE_NOTES.md`](docs/SLIDE_NOTES.md)
 - Presentation: **Mon 9 Nov 2026**
 
