@@ -26,9 +26,11 @@ a **simple chat application built with socket programming**. Group of 4 students
 | AI feature | Chat summarization through the Google Gemini REST API, called **from the server** with `urllib.request` over HTTPS | Keeps the API key on the server only. If no key is set, fall back to a simple offline summary so the demo never breaks |
 | Dependencies | **Standard library only** (optionally `python-dotenv`, but parsing `.env` by hand is fine) | Zero setup on lab machines |
 
-Default model `gemini-3-flash-preview` (env `GEMINI_MODEL`), then `gemini-2.5-flash` and `gemini-2.5-flash-lite`
+Default model `gemini-3.1-flash-lite` (env `GEMINI_MODEL`), then `gemini-3.5-flash-lite` and `gemini-3.5-flash`
 (env `GEMINI_FALLBACK_MODELS`, comma-separated) on HTTP 429/404/503. The free tier is tiny (5–10 requests/min, 20/day
 per model), so tests and `scripts/e2e_gui_check.py` must mock the HTTP call or force offline mode. Never make real calls in tests.
+Model names get retired: Google answers HTTP 404 "no longer available to new users" (the 2.5 models did). If that happens, list the models
+your key can use (`GET /v1beta/models`) and update the defaults in `ai.py` and `.env.example`.
 
 ## Planned layout
 
