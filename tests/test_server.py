@@ -20,14 +20,16 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # so "import server" works from any folder
 
 import ai
+import ai_bot
 from protocol import (
-    ALREADY_MEMBER, BAD_NAME, BAD_REQUEST, BUSY, DM, ERROR, GROUP_CREATE, GROUP_EXISTS, GROUP_JOIN,
-    GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO, MSG, NAME_TAKEN, NO_SUCH_GROUP, NO_SUCH_USER,
-    NOT_MEMBER, SUMMARIZE, SUMMARY, USERS, WELCOME, recv_msg, send_msg,
+    AI_FAILED, ALREADY_MEMBER, BAD_NAME, BAD_REQUEST, BOT_ASK, BOT_CLEAR, BOT_REPLY, BUSY, DM, ERROR,
+    GROUP_CREATE, GROUP_EXISTS, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO, MSG, NAME_TAKEN,
+    NO_SUCH_GROUP, NO_SUCH_USER, NOT_MEMBER, SUMMARIZE, SUMMARY, USERS, WELCOME, recv_msg, send_msg,
 )
 from server import ChatServer
 
 logging.getLogger("ai").addHandler(logging.NullHandler())   # keep expected warnings off the console
+logging.getLogger("ai_bot").addHandler(logging.NullHandler())
 
 TIMEOUT = 2.0       # seconds to wait for a message we expect
 QUIET_TIME = 0.3    # seconds to listen when checking that a message does NOT arrive
@@ -92,13 +94,20 @@ def offline_summarizer(room, messages):
     return ai.summarize(room, messages, ai.Config(api_key="", models=[]))
 
 
+def offline_bot(history, text, room, messages):
+    """Default for test servers: never read the real .env key, never call the real API."""
+    return ai_bot.ask(history, text, room, messages, ai.Config(api_key="", models=[]))
+
+
 class ServerTestCase(unittest.TestCase):
     """Starts a fresh server on a free port before each test."""
 
     summarizer = staticmethod(offline_summarizer)
+    bot = staticmethod(offline_bot)
 
     def setUp(self):
-        self.server = ChatServer("127.0.0.1", 0, summarizer=self.summarizer)   # port 0: OS picks a free port
+        # port 0: the OS picks a free port
+        self.server = ChatServer("127.0.0.1", 0, summarizer=self.summarizer, bot=self.bot)
         self.port = self.server.start()
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.clients = []
@@ -429,6 +438,216 @@ class Special1KeyLeakTests(ServerTestCase):
                   for _ in range(2)]
         reply = self.summarize_with(errors)
         self.assertEqual(reply["model"], ai.OFFLINE)
+
+
+class Special4ChatbotTests(ServerTestCase):
+    """The chatbot: private to the asker, remembers a short conversation, same privacy checks as SUMMARIZE.
+    The AI itself is faked."""
+
+    def setUp(self):
+        self.calls = []                     # (history, text, room, [texts]) every time the bot was asked
+        self.release = threading.Event()
+        self.release.set()                  # set = answer immediately; clear() to make it "slow"
+        self.fail_with = None               # an exception to raise instead of answering
+        self.model = "fake-model"
+        super().setUp()
+        self.alice = self.connect("alice")
+        self.bob = self.connect("bob")
+        self.carol = self.connect("carol")
+
+    def bot(self, history, text, room, messages):
+        texts = None if messages is None else [m["text"] for m in messages]
+        self.calls.append((list(history), text, room, texts))
+        self.release.wait(TIMEOUT)
+        if self.fail_with is not None:
+            raise self.fail_with
+        return f"echo: {text}", self.model
+
+    def ask(self, client, text, **fields):
+        client.send(BOT_ASK, text=text, **fields)
+        return client.wait_for(BOT_REPLY)
+
+    def wait_until(self, condition):
+        for _ in range(100):
+            if condition():
+                return
+            threading.Event().wait(0.02)
+        self.fail("timed out waiting for the server")
+
+    def test_reply_goes_only_to_the_asker(self):
+        reply = self.ask(self.alice, "what is TCP?")
+        self.assertEqual({k: reply[k] for k in ("type", "text", "model")},
+                         {"type": BOT_REPLY, "text": "echo: what is TCP?", "model": "fake-model"})
+        self.assertIsInstance(reply["ts"], float)
+        self.bob.assert_no(BOT_REPLY)
+        self.carol.assert_no(BOT_REPLY)
+
+    def test_the_chatbot_is_not_a_room(self):
+        self.ask(self.alice, "secret question")
+        self.assertEqual(len(self.server.buffer.rooms), 0)      # nothing is written to the message buffer
+        self.alice.send(SUMMARIZE, room="dm:alice|bob")         # so a summary has nothing to include
+        self.alice.wait_for(SUMMARY)
+        self.bob.assert_no(MSG)
+
+    def test_it_remembers_earlier_questions_per_user(self):
+        self.ask(self.alice, "q1")
+        self.ask(self.alice, "q2")
+        self.ask(self.bob, "bob's first question")
+        self.assertEqual(self.calls[1][0], [("q1", "echo: q1")])
+        self.assertEqual(self.calls[2][0], [])                  # bob doesn't see alice's conversation
+
+    def test_it_keeps_only_the_newest_pairs(self):
+        for i in range(ai_bot.MAX_PAIRS + 2):
+            self.ask(self.alice, f"q{i}")
+        history = self.calls[-1][0]
+        self.assertEqual((len(history), history[0][0], history[-1][0]), (ai_bot.MAX_PAIRS, "q1", f"q{ai_bot.MAX_PAIRS}"))
+
+    def test_clear_makes_it_forget(self):
+        self.ask(self.alice, "q1")
+        self.alice.send(BOT_CLEAR)                              # no reply; the next question shows the effect
+        self.ask(self.alice, "q2")
+        self.assertEqual(self.calls[1][0], [])
+
+    def test_clear_while_thinking_discards_that_answer_too(self):
+        self.release.clear()
+        self.alice.send(BOT_ASK, text="q1")
+        self.alice.send(BOT_CLEAR)
+        self.release.set()
+        self.alice.wait_for(BOT_REPLY)
+        self.ask(self.alice, "q2")
+        self.assertEqual(self.calls[1][0], [])                  # q1 was asked before the clear: forgotten
+
+    def test_one_question_at_a_time_and_others_keep_chatting(self):
+        self.release.clear()                                    # the fake AI blocks until we release it
+        self.alice.send(BOT_ASK, text="q1")
+        self.alice.send(BOT_ASK, text="q2")
+        error = self.alice.wait_for(ERROR)
+        self.assertEqual((error["code"], error["request"]), (BUSY, BOT_ASK))
+        self.bob.send(DM, to="alice", text="still chatting")    # handled while the AI "thinks"
+        self.alice.wait_for(MSG, text="still chatting")
+        self.release.set()
+        self.assertEqual(self.alice.wait_for(BOT_REPLY)["text"], "echo: q1")
+        self.assertEqual([c[1] for c in self.calls], ["q1"])    # q2 never reached the AI
+
+    def test_blank_question_is_rejected(self):
+        for text in ("", "   ", None, 42):
+            self.alice.send(BOT_ASK, text=text)
+            error = self.alice.wait_for(ERROR)
+            self.assertEqual((error["code"], error["request"]), (BAD_REQUEST, BOT_ASK), text)
+        self.assertEqual(self.calls, [])
+
+    def test_explain_a_chat_uses_that_rooms_messages(self):
+        self.alice.send(DM, to="bob", text="lab report due Friday")
+        self.bob.wait_for(MSG, text="lab report due Friday")
+        self.ask(self.alice, "explain", room="dm:alice|bob")
+        self.assertEqual(self.calls[0][2:], ("dm:alice|bob", ["lab report due Friday"]))
+
+    def test_cannot_use_someone_elses_dm_as_context(self):
+        self.alice.send(DM, to="bob", text="just us")
+        self.bob.wait_for(MSG, text="just us")
+        self.carol.send(BOT_ASK, text="what did they say?", room="dm:alice|bob")
+        error = self.carol.wait_for(ERROR)
+        self.assertEqual((error["code"], error["request"]), (NOT_MEMBER, BOT_ASK))
+        self.carol.assert_no(BOT_REPLY)
+        self.assertEqual(self.calls, [])                        # the AI never saw the private chat
+
+    def test_cannot_use_a_group_you_are_not_in_as_context(self):
+        self.create_group(self.alice, "netlab")
+        self.alice.send(GROUP_MSG, group="netlab", text="members only")
+        self.alice.wait_for(MSG, text="members only")
+        self.carol.send(BOT_ASK, text="what did they say?", room="group:netlab")
+        self.assertEqual(self.carol.wait_for(ERROR)["code"], NOT_MEMBER)
+        self.assertEqual(self.calls, [])
+
+    def test_bad_room_ids_carry_the_request_name(self):
+        for room, code in [("lobby", BAD_REQUEST), ("group:missing", NO_SUCH_GROUP)]:
+            self.alice.send(BOT_ASK, text="hi", room=room)
+            error = self.alice.wait_for(ERROR)
+            self.assertEqual((error["code"], error["request"]), (code, BOT_ASK), room)
+
+    def test_a_late_joiner_only_gives_the_bot_messages_from_after_joining(self):
+        self.create_group(self.alice, "netlab")
+        self.alice.send(GROUP_MSG, group="netlab", text="before bob joined")
+        self.alice.wait_for(MSG, text="before bob joined")
+        self.bob.send(GROUP_JOIN, group="netlab")
+        self.alice.wait_for(GROUPS, groups=[{"name": "netlab", "creator": "alice", "members": ["alice", "bob"]}])
+        self.alice.send(GROUP_MSG, group="netlab", text="after bob joined")
+        self.bob.wait_for(MSG, text="after bob joined")
+        self.ask(self.bob, "explain", room="group:netlab")
+        self.assertEqual(self.calls[0][3], ["after bob joined"])
+
+    def test_ai_failure_gives_ai_failed_and_the_next_question_still_works(self):
+        self.fail_with = ai_bot.BotError("HTTP 429")
+        self.alice.send(BOT_ASK, text="q1")
+        error = self.alice.wait_for(ERROR)
+        self.assertEqual((error["code"], error["request"]), (AI_FAILED, BOT_ASK))
+        self.fail_with = None
+        self.ask(self.alice, "q2")                              # not stuck on BUSY
+        self.assertEqual(self.calls[1][0], [])                  # and the failed question wasn't remembered
+
+    def test_a_crash_in_the_bot_does_not_leave_the_user_waiting(self):
+        self.fail_with = RuntimeError("bug")
+        with self.assertLogs("server", level="ERROR"):
+            self.alice.send(BOT_ASK, text="q1")
+            self.assertEqual(self.alice.wait_for(ERROR)["code"], AI_FAILED)
+
+    def test_an_offline_notice_is_not_remembered(self):
+        self.model = ai.OFFLINE
+        self.ask(self.alice, "q1")
+        self.ask(self.alice, "q2")
+        self.assertEqual(self.calls[1][0], [])                  # the "no API key" text isn't conversation
+
+    def test_a_new_login_starts_with_an_empty_conversation(self):
+        self.ask(self.alice, "q1")                              # the bot now remembers q1 for alice
+        self.alice.close()
+        self.wait_until(lambda: "alice" not in self.server.clients)
+        new_alice = self.connect("alice")                       # same name, new connection
+        self.ask(new_alice, "q2")
+        self.assertEqual(self.calls[1][0], [])
+
+    def test_nobody_gets_an_answer_meant_for_a_user_who_left(self):
+        self.release.clear()
+        self.alice.send(BOT_ASK, text="q1")
+        self.wait_until(lambda: self.calls)                     # the worker is now blocked inside the bot
+        self.alice.close()
+        self.wait_until(lambda: "alice" not in self.server.clients)
+        new_alice = self.connect("alice")                       # someone logs in with the same name
+        self.release.set()
+        self.wait_until(lambda: "alice" not in self.server.asking)
+        new_alice.assert_no(BOT_REPLY)
+        self.ask(new_alice, "q2")
+        self.assertEqual(self.calls[1][0], [])                  # and starts with an empty conversation
+
+
+class Special4KeyLeakTests(ServerTestCase):
+    """Real ai_bot.ask with a fake key and a mocked HTTP layer: the key must never reach a client."""
+
+    KEY = "TEST-SECRET-KEY-123"
+
+    def bot(self, history, text, room, messages):
+        return ai_bot.ask(history, text, room, messages, ai.Config(api_key=self.KEY, models=["model-a", "model-b"]))
+
+    def ask_with(self, urlopen_result, expect):
+        """Ask "hi" with the HTTP layer mocked; `expect` is the message type the client should get (reply or ERROR)."""
+        alice = self.connect("alice")
+        with mock.patch("ai_bot.urllib.request.urlopen", side_effect=urlopen_result) as urlopen:
+            alice.send(BOT_ASK, text="hi")
+            reply = alice.wait_for(expect)
+        self.assertNotIn(self.KEY, json.dumps(alice.received))
+        for call in urlopen.call_args_list:         # and the key only ever travels in the header
+            self.assertNotIn(self.KEY, call.args[0].full_url)
+        return reply
+
+    def test_key_not_leaked_on_success(self):
+        body = {"candidates": [{"content": {"parts": [{"text": "hello there"}]}}]}
+        response = mock.MagicMock()
+        response.__enter__.return_value = io.BytesIO(json.dumps(body).encode())
+        reply = self.ask_with([response], BOT_REPLY)
+        self.assertEqual((reply["text"], reply["model"]), ("hello there", "model-a"))
+
+    def test_key_not_leaked_when_gemini_fails(self):
+        errors = [urllib.error.HTTPError("https://example.invalid", 403, f"bad key {self.KEY}", {}, io.BytesIO())]
+        self.assertEqual(self.ask_with(errors, ERROR)["code"], AI_FAILED)
 
 
 class RobustnessTests(ServerTestCase):

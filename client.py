@@ -21,8 +21,8 @@ import tkinter as tk
 from tkinter import font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 
 from protocol import (
-    BYE, DM, ERROR, GROUP_CREATE, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO,
-    MAX_NAME_LEN, MSG, NAME_TAKEN, SUMMARIZE, SUMMARY, USERS, WELCOME,
+    BOT_ASK, BOT_CLEAR, BOT_REPLY, BYE, DM, ERROR, GROUP_CREATE, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG,
+    GROUPS, HELLO, MAX_NAME_LEN, MSG, NAME_TAKEN, SUMMARIZE, SUMMARY, USERS, WELCOME,
     ProtocolError, clean_name, dm_partner, dm_room, group_room, recv_msg, send_msg,
 )
 
@@ -551,7 +551,7 @@ class ChatApp:
         self.users = []                   # online names, in the order shown in the user list
         self.groups = {}                    # group name -> {"creator": ..., "members": [...]}
         self.handlers = {USERS: self.on_users, GROUPS: self.on_groups, MSG: self.on_msg,
-                         SUMMARY: self.on_summary, ERROR: self.on_error}
+                         SUMMARY: self.on_summary, BOT_REPLY: self.on_bot_reply, ERROR: self.on_error}
 
         self.build_widgets()
         root.title(f"Socket Chat: {name}")
@@ -735,8 +735,17 @@ class ChatApp:
         if tab is not None:                 # the tab may have closed (e.g. we left the group)
             tab.add_summary(msg["text"], msg["model"])
 
+    def on_bot_reply(self, msg):
+        """Special 4: the chatbot's answer, sent only to us. Replaces "Thinking…" in the assistant tab."""
+        if self.bot_tab is not None:
+            self.bot_tab.add_reply(msg["text"], msg["model"])
+
     def on_error(self, msg):
         """The server refused a request (e.g. GROUP_EXISTS, NO_SUCH_USER)."""
+        if msg.get("request") == BOT_ASK:   # the chatbot failed: show it in its tab instead of a pop-up
+            if self.bot_tab is not None:
+                self.bot_tab.failed(msg.get("message") or "Couldn't get an answer. Try again.")
+            return
         for tab in self.rooms.values():     # if it was a SUMMARIZE that failed, allow a retry
             tab.enable_summarize()
         messagebox.showwarning(msg.get("code", "Error"), msg.get("message", ""), parent=self.root)
@@ -829,11 +838,17 @@ class ChatApp:
 
     def ask_bot(self, text, use_last_chat):
         """Chatbot: a question was typed. With use_last_chat, self.last_room is the room it is about."""
-        self.bot_tab.add_notice("The assistant isn't available yet.")
-        return False
+        fields = {"text": text}
+        if use_last_chat:
+            if self.last_room not in self.rooms:        # no chat tab was opened yet, or it has been closed
+                self.bot_tab.add_notice("Open a chat tab first, then I can explain it.")
+                return False
+            fields["room"] = self.last_room             # the server checks we may read it, then adds its messages
+        return self.send(BOT_ASK, **fields)
 
     def clear_bot(self):
         """Chatbot: "Clear conversation" was clicked; the server should forget it too."""
+        self.send(BOT_CLEAR)
 
     # ------------------------------------------------------------------
     # Button and double-click actions

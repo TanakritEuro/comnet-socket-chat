@@ -15,10 +15,12 @@ import time
 from collections import defaultdict, deque
 
 import ai
+import ai_bot
 from protocol import (
-    ALREADY_MEMBER, BAD_NAME, BAD_REQUEST, BUSY, BYE, DM, ERROR, GROUP_CREATE, GROUP_EXISTS,
-    GROUP_JOIN, GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO, MAX_NAME_LEN, MSG, NAME_TAKEN,
-    NO_SUCH_GROUP, NO_SUCH_USER, NOT_MEMBER, SUMMARIZE, SUMMARY, USERS, WELCOME,
+    AI_FAILED, ALREADY_MEMBER, BAD_NAME, BAD_REQUEST, BOT_ASK, BOT_CLEAR, BOT_REPLY, BUSY, BYE,
+    DM, ERROR, GROUP_CREATE, GROUP_EXISTS, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO,
+    MAX_NAME_LEN, MSG, NAME_TAKEN, NO_SUCH_GROUP, NO_SUCH_USER, NOT_MEMBER, SUMMARIZE, SUMMARY,
+    USERS, WELCOME,
     ProtocolError, clean_name, dm_room, group_room, recv_msg, send_msg,
 )
 
@@ -59,7 +61,7 @@ class ChatServer:
     send buffer fills up. That is acceptable for a classroom chat.
     """
 
-    def __init__(self, host="0.0.0.0", port=5050, summarizer=ai.summarize):
+    def __init__(self, host="0.0.0.0", port=5050, summarizer=ai.summarize, bot=ai_bot.ask):
         self.host = host
         self.port = port
         self.lock = threading.Lock()
@@ -69,6 +71,9 @@ class ChatServer:
         self.buffer = MessageBuffer()
         self.summarizer = summarizer    # function(room, messages) -> (text, model); tests swap in a fake
         self.summarizing = set()        # names with a summary in progress (protects the tiny API quota)
+        self.bot = bot                  # function(history, text, room, messages) -> (answer, model); tests swap in a fake
+        self.bot_history = {}           # name -> [(question, answer), ...] the chatbot remembers for that user
+        self.asking = set()             # names with a chatbot question in progress
         self.listen_sock = None
         self.running = False
         # Which method handles which message type (after login).
@@ -79,6 +84,8 @@ class ChatServer:
             GROUP_LEAVE: self.handle_group_leave,
             GROUP_MSG: self.handle_group_msg,
             SUMMARIZE: self.handle_summarize,
+            BOT_ASK: self.handle_bot_ask,
+            BOT_CLEAR: self.handle_bot_clear,
         }
 
     # ------------------------------------------------------------------
@@ -164,9 +171,10 @@ class ChatServer:
         except OSError:
             pass
 
-    def send_error(self, sock, code, text):
-        """Send an ERROR to one client."""
-        self.send(sock, {"type": ERROR, "code": code, "message": text})
+    def send_error(self, sock, code, text, **extra):
+        """Send an ERROR to one client. `extra` adds fields such as request="BOT_ASK", so the
+        client can tell which of its requests failed (see PROTOCOL.md)."""
+        self.send(sock, {"type": ERROR, "code": code, "message": text, **extra})
 
     def broadcast_users(self):
         """R4: send the full online list to every client. Everyone gets the same list,
@@ -229,6 +237,7 @@ class ChatServer:
         """
         with self.lock:
             self.clients.pop(name, None)
+            self.bot_history.pop(name, None)    # the chatbot conversation belongs to this connection
             self.broadcast_users()
 
     # ------------------------------------------------------------------
@@ -345,33 +354,92 @@ class ChatServer:
                 self.send(sock, {"type": SUMMARY, "room": room, "text": text, "model": model})
         log.info("summary for %s in %s: %d messages, model %s", name, room, len(messages), model)
 
-    def visible_since(self, sock, name, room):
+    def handle_bot_ask(self, name, msg):
+        """Special 4: ask the chatbot. The answer goes back to the asker only.
+
+        The chatbot is not a room: questions and answers are never written to the message buffer
+        and never sent to anyone else. The server remembers the last few pairs per user as context.
+        With "room", that room's recent messages are added too, after the same privacy check as SUMMARIZE.
+        Like SUMMARIZE, the slow Gemini call runs in a worker thread outside the lock.
+        """
+        text, room = msg.get("text"), msg.get("room")
+        with self.lock:
+            me = self.clients[name]
+            if not is_text(text):
+                return self.send_error(me, BAD_REQUEST, "text must be a non-empty string", request=BOT_ASK)
+            if name in self.asking:
+                return self.send_error(me, BUSY, "the assistant is still answering your previous question",
+                                       request=BOT_ASK)
+            messages = None
+            if room is not None:
+                since = self.visible_since(me, name, room, request=BOT_ASK)
+                if since is None:
+                    return                      # an ERROR was already sent
+                messages = self.buffer.recent(room, since)
+            history = self.bot_history.setdefault(name, [])
+            self.asking.add(name)
+            context = list(history)             # a copy for the worker, so later changes can't race with it
+        threading.Thread(target=self.bot_worker, args=(name, me, text, room, messages, history, context),
+                         daemon=True).start()
+
+    def bot_worker(self, name, sock, text, room, messages, history, context):
+        """Worker thread: ask the AI (slow, no lock held), then reply to the asker only."""
+        answer = model = None
+        try:
+            answer, model = self.bot(context, text, room, messages)
+        except ai_bot.BotError as e:
+            log.info("chatbot for %s failed: %s", name, e)
+        except Exception:                       # a bug must not leave the user stuck on "Thinking…"
+            log.exception("chatbot crashed")
+        with self.lock:
+            self.asking.discard(name)
+            if self.clients.get(name) is not sock:
+                return                          # the asker left (or logged in again): nobody to answer
+            if answer is None:
+                return self.send_error(sock, AI_FAILED, "the assistant couldn't answer right now, try again",
+                                       request=BOT_ASK)
+            # Remember the pair, except the "no API key" notice, which isn't part of the conversation.
+            # If the user cleared the chat (or left) while we waited, `history` is no longer in
+            # self.bot_history, so this only changes a list nobody reads: the answer is forgotten too.
+            if model != ai.OFFLINE:
+                history.append((text, answer))
+                del history[:-ai_bot.MAX_PAIRS]     # keep only the newest pairs
+            self.send(sock, {"type": BOT_REPLY, "text": answer, "model": model, "ts": time.time()})
+        log.info("chatbot answer for %s: model %s", name, model)
+
+    def handle_bot_clear(self, name, msg):
+        """Special 4: forget this user's chatbot conversation. There is no reply."""
+        with self.lock:
+            self.bot_history.pop(name, None)
+
+    def visible_since(self, sock, name, room, **extra):
         """Privacy check for reading a room's past messages (same rules as delivery, R7/R11).
 
         Returns the Unix time from which `name` may read `room`: 0 for their own DMs, their join
-        time for a group they are in. Otherwise sends an ERROR and returns None. Caller holds the lock.
+        time for a group they are in. Otherwise sends an ERROR (with the `extra` fields) and
+        returns None. Caller holds the lock.
         """
         if not isinstance(room, str) or not room.startswith(("dm:", "group:")):
-            self.send_error(sock, BAD_REQUEST, f"{room!r} is not a room id")
+            self.send_error(sock, BAD_REQUEST, f"{room!r} is not a room id", **extra)
             return None
         if room.startswith("dm:"):
             if name not in room.removeprefix("dm:").split("|"):
-                self.send_error(sock, NOT_MEMBER, "you can only read your own private chats")
+                self.send_error(sock, NOT_MEMBER, "you can only read your own private chats", **extra)
                 return None
             return 0.0
-        info = self.find_group(sock, room.removeprefix("group:"))
+        info = self.find_group(sock, room.removeprefix("group:"), **extra)
         if info is None:
             return None
         if name not in info["members"]:
-            self.send_error(sock, NOT_MEMBER, f"join {room.removeprefix('group:')!r} first")
+            self.send_error(sock, NOT_MEMBER, f"join {room.removeprefix('group:')!r} first", **extra)
             return None
         return info["joined"][name]             # only messages from after they joined
 
-    def find_group(self, sock, group):
+    def find_group(self, sock, group, **extra):
         """Return the group's info dict, or send NO_SUCH_GROUP and return None. Caller holds the lock."""
         info = self.groups.get(group) if isinstance(group, str) else None
         if info is None:
-            self.send_error(sock, NO_SUCH_GROUP, f"there is no group {group!r}")
+            self.send_error(sock, NO_SUCH_GROUP, f"there is no group {group!r}", **extra)
         return info
 
 
