@@ -49,6 +49,36 @@ in the message that merged PR #2:
 > - README "How to demo on 2+ computers" section (find the server IP with ipconfig, Windows firewall inbound rule for the port).
 > - Open the PR.
 
+**Prompt P4** (AI summarization, PR `feat/ai-summary`):
+
+> Read CLAUDE.md and docs/PROTOCOL.md. Make sure main is up to date and create the branch feat/ai-summary.
+>
+> Implement special point 1, AI chat summarization.
+>
+> Message buffer (history isn't built yet):
+> - Add a small in-memory buffer on the server: the last 50 messages per room (collections.deque). Design it so the upcoming feat/history-unread PR can extend it rather than replace it.
+>
+> Feature:
+> - A "Summarize" button in each room tab sends SUMMARIZE {room}. The server checks that the requester is allowed to see that room (same rules as DM/group delivery). A non-member gets ERROR NOT_MEMBER.
+> - ai.py sends that room's buffered messages to the Gemini REST API using urllib.request (stdlib only). Send the key in the x-goog-api-key header, never in the URL. Check the current generateContent endpoint and request format in Google's docs.
+> - Run the API call in a worker thread so the server keeps serving other clients while it waits. Use a timeout of about 15 s.
+> - Reply with SUMMARY {room, text, model} only to the requester. Show it in that room's chat window as a clearly marked system message, with the model name underneath (e.g. "AI summary · <model>").
+> - Never print or log the API key.
+>
+> Models (my free tier: Gemini 3 Flash, Gemini 2.5 Flash and Gemini 2.5 Flash Lite, each limited to 5–10 requests/min and 20 requests/day):
+> - Read GEMINI_API_KEY from .env (parse it by hand; stdlib only). Find the exact model IDs by calling the models.list endpoint once. Don't print the key.
+> - GEMINI_MODEL = the Gemini 3 Flash ID. GEMINI_FALLBACK_MODELS = the 2.5 Flash and 2.5 Flash Lite IDs, comma-separated.
+> - On HTTP 429 (rate limit), 404 or 503, try the next model. If every model fails, or there's no key, or the room has no messages, return an offline summary (message count, participants, last few lines) with model "offline", so the demo never breaks.
+> - Update .env.example with both variables (no real key in it). Set them in my .env too, without touching the key line.
+> - Quota is tiny: make at most 2–3 real API calls while developing. Everything else must use mocks.
+>
+> Tests and docs:
+> - Unit tests with the HTTP call mocked: summary goes only to the requester; a non-member can't summarize a group; fallback to the next model on 429; offline summary when there's no key or every model fails; the key never shows up in any message sent to clients.
+> - Extend scripts/e2e_gui_check.py to click Summarize. Force offline mode there so it doesn't use quota.
+> - Update docs/PROTOCOL.md (SUMMARIZE / SUMMARY), docs/SLIDE_NOTES.md (Special 1: how it works, code snapshot locations, the model name and a link to Google's Gemini models docs as the reference, and quote this prompt), README (how to set up the key and the free-tier limits), and docs/ARCHITECTURE.md / the deployment diagram if anything changed ("planned" should no longer appear).
+>
+> Then run the unit tests and the e2e check, open a PR, and stop. In your summary, tell me which model IDs you found and how many real API calls you made.
+
 ## R1: System architecture
 Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides are in [`docs/diagrams/`](diagrams/)
 (re-render with `python scripts/render_diagrams.py` after editing the Mermaid blocks).
@@ -58,7 +88,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   other directly, so the server enforces every privacy rule. Only the server calls Gemini, over HTTPS, so the API key
   stays on the server.
   The yellow note on the slide: the server can also run on one of the client PCs. The Gemini arrows (① request, ② summary) are
-  the planned Special 1 call.
+  the Special 1 AI summary call.
   - Backup slides / Q&A (all PNGs are rendered at 2x scale, so they stay sharp on a projector):
     - `diagrams/threads-server.png`: one thread per client, one lock. The dashed arrow shows *alice's* thread writing to
       *bob's* socket, which is why sends need the lock.
@@ -76,7 +106,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
     boundaries; a length prefix is safe for any content and lets us reject huge frames. *How:* `send_msg` / `recv_msg` with a looped `recv_exact`.
   - **JSON:** *Why:* readable in Wireshark, easy to extend, built into Python, same format as the Gemini API. *How:* `json.dumps(..., ensure_ascii=False)`.
   - **HTTPS (HTTP over TLS):** encrypted, authenticated connection to Gemini on TCP 443. *Why:* it protects the API key and chat text, and Google
-    requires it. *How (planned, Special 1):* `urllib.request` POST from the server only.
+    requires it. *How (Special 1):* `urllib.request` POST from the server only, key in the `x-goog-api-key` header.
 - **AI prompt:** P3
 
 ## R2: Socket programming only
@@ -84,8 +114,8 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   Python standard library, with no Socket.IO, WebSocket or HTTP. TCP is a byte stream, so each JSON message has a 4-byte
   length prefix in front of it. `recv_exact` loops on `recv()` until it has exactly that many bytes, because a single `recv()` can return half a
   message, or two messages at once.
-- **Code snapshot (mandatory):** `protocol.py` → `send_msg` (L68–76), `recv_exact` (L79–93), `recv_msg` (L96–117)
-- **Code snapshot 2:** `server.py` → `ChatServer.start` (L61–77: socket/bind/listen) and `serve_forever` (L79–89: `accept()` + one thread per client)
+- **Code snapshot (mandatory):** `protocol.py` → `send_msg` (L71–79), `recv_exact` (L82–96), `recv_msg` (L99–120)
+- **Code snapshot 2:** `server.py` → `ChatServer.start` (L88–104: socket/bind/listen) and `serve_forever` (L106–116: `accept()` + one thread per client)
 - **Proof:** `tests/test_protocol.py` → `test_frame_arriving_in_small_pieces`, `test_two_frames_in_one_send`
 - **AI prompt:** P1
 
@@ -93,41 +123,41 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 - **How:** The first message must be `HELLO {name}`. Under the lock, the server checks the name against the dict of
   online clients. If the name is taken it replies `ERROR NAME_TAKEN`, and the client can try again on the same connection. A name is
   released when its client disconnects.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.login` (L169–195)
-- **Code snapshot 2:** `protocol.py` → `clean_name` (L124–135: 1–20 chars, no `|`)
-- **Proof:** `tests/test_server.py` → `R3UniqueNameTests` (L108–139)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.login` (L196–222)
+- **Code snapshot 2:** `protocol.py` → `clean_name` (L127–138: 1–20 chars, no `|`)
+- **Proof:** `tests/test_server.py` → `R3UniqueNameTests` (L126–157)
 - **AI prompt:** P1
 
 ## R4: Online user list (incl. self)
 - **How:** Whenever someone logs in or disconnects, the server sends every client the same
   `USERS` message: the sorted list of **all** online names. Because the list is the same for everyone, each client also sees itself.
   A crash (TCP RST → `ConnectionResetError`) is handled like a normal close.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.broadcast_users` (L144–149)
-- **Code snapshot 2:** `server.py` → `ChatServer.handle_client` (L97–126: the `finally:` block calls `remove_client`) and `remove_client` (L197–205)
-- **Proof:** `tests/test_server.py` → `R4UserListTests` (L142–161)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.broadcast_users` (L171–176)
+- **Code snapshot 2:** `server.py` → `ChatServer.handle_client` (L124–153: the `finally:` block calls `remove_client`) and `remove_client` (L224–232)
+- **Proof:** `tests/test_server.py` → `R4UserListTests` (L160–179)
 - **AI prompt:** P1
 
 ## R5: Separate chat room per chat
 - **How:** Every room id gets its own tab in a `ttk.Notebook`. DM tabs are titled `@bob` (room id `dm:alice|bob`) and group tabs `#netlab`
   (`group:netlab`). `open_room` creates a tab only the first time a room id is seen. Incoming messages are routed by their `room`
   field, so a DM from a new person opens a new tab instead of mixing into another one.
-- **Code snapshot (mandatory):** `client.py` → `ChatApp.open_room` + `open_dm` + `open_group` (L327–345)
-- **Code snapshot 2:** `client.py` → `ChatApp.on_msg` (L299–309: route an incoming `MSG` to its room's tab)
+- **Code snapshot (mandatory):** `client.py` → `ChatApp.open_room` + `open_dm` + `open_group` (L366–384)
+- **Code snapshot 2:** `client.py` → `ChatApp.on_msg` (L330–340: route an incoming `MSG` to its room's tab)
 - **AI prompt:** P2
 
 ## R6: Chat box + chat window
 - **How:** Each `RoomTab` has a read-only `ScrolledText` chat window (`state="disabled"`, unlocked for a moment to append) and
   an `Entry` + **Send** button (Enter also sends). Your own message appears when the server echoes it back, so what you
   see is what the server actually delivered.
-- **Code snapshot (mandatory):** `client.py` → `RoomTab.__init__` (L109–128)
-- **Code snapshot 2:** `client.py` → `RoomTab.send` / `add_message` / `append` (L130–150)
+- **Code snapshot (mandatory):** `client.py` → `RoomTab.__init__` (L110–138)
+- **Code snapshot 2:** `client.py` → `RoomTab.send` / `add_message` (L140–150) and `append` (L176–180)
 - **AI prompt:** P2
 
 ## Client threading (R2 Q&A, and why the GUI never freezes)
 - One **receiver thread** blocks in `recv_msg()` and puts each message on a `queue.Queue`. The Tk main thread drains the
   queue every 50 ms with `root.after()`. Only the main thread touches widgets, because Tkinter is not thread-safe.
   The main thread sends directly. A TCP socket is full-duplex, so sending while another thread is in `recv()` is safe.
-- **Code snapshot:** `client.py` → `ChatApp.receive_loop` + `poll_inbox` (L213–238), module docstring diagram (L1–14)
+- **Code snapshot:** `client.py` → `ChatApp.receive_loop` + `poll_inbox` (L244–269), module docstring diagram (L1–13)
 - **Login (R3 client side):** `LoginFrame.connect` (L55–96) opens the TCP connection, sends `HELLO`, and reads exactly one reply
   frame. On `NAME_TAKEN` it shows an error and lets the user pick another name.
 - **AI prompt:** P2
@@ -136,62 +166,80 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 - **Server side:** For `DM {to, text}`, the server builds one `MSG` with room id `dm:<a>|<b>` (names sorted) and
   writes it to exactly two sockets, the sender's and the recipient's. It never touches any other socket, so privacy does not depend on the
   client behaving.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_dm` (L212–226)
-- **Code snapshot 2:** `protocol.py` → `dm_room` (L138–141)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_dm` (L239–254)
+- **Code snapshot 2:** `protocol.py` → `dm_room` (L141–144)
 - **Proof:** `tests/test_server.py` → `test_dm_reaches_only_sender_and_recipient` (a third client, carol, receives nothing)
 - **AI prompt:** P1
 - **Client side:** Double-click a name in the user list → `open_dm` opens the `@name` tab, and Send sends `DM {to, text}`.
   The client never decides who sees a message; it only shows the `MSG` frames the server sends it.
-  Snapshot: `client.py` → `on_user_double_click` (L357–360), `open_dm` (L337–340), `on_msg` (L299–309). AI prompt: P2
+  Snapshot: `client.py` → `on_user_double_click` (L396–399), `open_dm` (L376–379), `on_msg` (L330–340). AI prompt: P2
 
 ## R8: Create group (creator is only member)
 - **Server side:** `GROUP_CREATE` stores `{"creator": name, "members": [name]}`, so the only member is the creator. The server then
   broadcasts the new `GROUPS` list to everyone. Duplicate names get `GROUP_EXISTS`.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_group_create` (L228–238)
-- **Proof:** `tests/test_server.py` → `R8CreateGroupTests` (L190–209)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_group_create` (L256–267)
+- **Proof:** `tests/test_server.py` → `R8CreateGroupTests` (L208–227)
 - **AI prompt:** P1
 - **Client side:** **Create…** asks for a name and sends `GROUP_CREATE`. The `#group` tab opens when the server's `GROUPS`
-  update shows us as a member. Snapshot: `client.py` → `create_group` (L380–389). AI prompt: P2
+  update shows us as a member. Snapshot: `client.py` → `create_group` (L419–428). AI prompt: P2
 
 ## R9: List all groups with members
 - **Server side:** `groups_message` builds the list of every group with its creator and members. It is broadcast after
   each create, join or leave, and also sent to each new client right after login, so late joiners see the existing groups.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.groups_message` + `broadcast_groups` (L151–163)
-- **Proof:** `tests/test_server.py` → `R9GroupListTests` (L212–230)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.groups_message` + `broadcast_groups` (L178–190)
+- **Proof:** `tests/test_server.py` → `R9GroupListTests` (L230–248)
 - **AI prompt:** P1
 - **Client side:** A `ttk.Treeview` shows each group as a parent row (`netlab (2 members) ✓ joined`) with its members
   underneath, marked `(you)` and `(creator)`. It's rebuilt on every `GROUPS` message, so it updates live.
-  Snapshot: `client.py` → `ChatApp.on_groups` (L274–297). AI prompt: P2
+  Snapshot: `client.py` → `ChatApp.on_groups` (L305–328). AI prompt: P2
 
 ## R10: Join group by yourself
 - **Server side:** `GROUP_JOIN` has only a `group` field. The server appends the name tied to **this connection**,
   so no message can add someone else. A test sends extra `name`/`user` fields naming carol, and only the sender is added.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_group_join` (L240–252)
-- **Code snapshot 2:** `server.py` → `handle_group_leave` (L254–265)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_group_join` (L269–282)
+- **Code snapshot 2:** `server.py` → `handle_group_leave` (L284–296)
 - **Proof:** `tests/test_server.py` → `test_join_adds_only_the_sender`
 - **AI prompt:** P1
 - **Client side:** Select a group, then **Join** (or double-click it and confirm). The `GROUP_JOIN` message has only a `group`
   field, so there is no way to name someone else. **Leave** sends `GROUP_LEAVE` and closes the tab.
-  Snapshot: `client.py` → `join_group` / `leave_group` (L391–400), `on_group_double_click` (L371–378). AI prompt: P2
+  Snapshot: `client.py` → `join_group` / `leave_group` (L430–439), `on_group_double_click` (L410–417). AI prompt: P2
 
 ## R11: Group message (members only)
 - **Server side:** For `GROUP_MSG`, the server first checks that the sender is in the member list. If not, it replies `ERROR NOT_MEMBER`
   and delivers nothing. Otherwise it writes the `MSG` (room `group:<name>`) only to the members' sockets.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_group_msg` (L267–283)
-- **Proof:** `tests/test_server.py` → `R11GroupMessageTests` (L265–297): non-members get nothing, a non-member's message is rejected and
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_group_msg` (L298–315)
+- **Proof:** `tests/test_server.py` → `R11GroupMessageTests` (L283–315): non-members get nothing, a non-member's message is rejected and
   reaches nobody, and a member who left stops receiving
 - **AI prompt:** P1
 - **Client side:** A group tab's Send sends `GROUP_MSG {group, text}`. Group tabs exist only for groups you're in, and
   even a modified client can't read a group it isn't in, because the server only sends to members.
-  Snapshot: `client.py` → `open_group` (L342–345). AI prompt: P2
+  Snapshot: `client.py` → `open_group` (L381–384). AI prompt: P2
 
 ## Q&A prep: concurrency
 - One thread per client (`serve_forever` → `threading.Thread(target=handle_client)`), and one `threading.Lock` guards
   `clients` and `groups`. Sends also happen under the lock, so two threads never interleave bytes on one socket, and every
-  client sees updates in the same order. See the `ChatServer` class docstring (L28–38).
+  client sees updates in the same order. See the `ChatServer` class docstring (L51–60).
 
 ## Special 1: AI chat summarization
-- AI model: _TODO (model name + link to docs)_
+- **How:** Each room tab has a **Summarize** button that sends `SUMMARIZE {room}`. The server checks that the requester may
+  read that room (same rules as delivery: your own DMs, or a group you're in, and only messages from after you joined). It then
+  hands the room's buffered messages (last 50, in memory) to a **worker thread**, which calls the Gemini REST API over HTTPS
+  and sends `SUMMARY {room, text, model}` back to **the requester only**. If a model is rate-limited (429), missing (404) or
+  overloaded (503), the next model is tried. With no key, no messages, or no working model, an offline summary is sent instead,
+  so the demo never breaks.
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_summarize` + `summarize_worker` + `visible_since` (L317–368)
+- **Code snapshot 2:** `ai.py` → `summarize` (L90–111: model fallback loop) and `call_gemini` (L124–144: the HTTPS request, key in the `x-goog-api-key` header)
+- **Code snapshot 3:** `client.py` → `RoomTab.summarize` + `add_summary` (L152–167); `server.py` → `MessageBuffer` (L31–47: `deque(maxlen=50)` per room)
+- **AI model:** Google **Gemini 3 Flash** (`gemini-3-flash-preview`), falling back to **Gemini 2.5 Flash** (`gemini-2.5-flash`) and
+  **Gemini 2.5 Flash-Lite** (`gemini-2.5-flash-lite`). We found these IDs by calling the `models.list` endpoint once with our key.
+  - Reference: Gemini models, https://ai.google.dev/gemini-api/docs/models
+  - API used: `generateContent` REST reference, https://ai.google.dev/api/generate-content
+- **Talking points:** the key never leaves the server; the AI call runs outside the lock, so chat keeps flowing while Gemini
+  thinks (about 4 s in our test); a user can only have one summary in progress (`BUSY`), which protects the free-tier quota.
+- **Proof:** `tests/test_ai.py` (mocked HTTP: request format, 429/404/503 fallback, offline cases, key never logged);
+  `tests/test_server.py` → `Special1SummarizeTests` (L318–397) and `Special1KeyLeakTests` (L400–431);
+  `scripts/e2e_gui_check.py` clicks **Summarize** (offline mode).
+- **AI prompt:** P4
 ## Special 2: File / image sending
 ## Special 3: Chat history + unread badges
 ## Special 4: Typing indicator + online status
