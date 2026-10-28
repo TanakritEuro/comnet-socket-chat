@@ -33,7 +33,7 @@ Set up on the **server machine only**:
 1. Get a free API key at https://aistudio.google.com/apikey.
 2. `cp .env.example .env` (PowerShell: `Copy-Item .env.example .env`) and paste the key after `GEMINI_API_KEY=`.
    `.env` is git-ignored. Never commit it, and never put the key on a client PC.
-3. Start the server. It logs `AI summaries: Gemini models gemini-3-flash-preview -> gemini-2.5-flash -> gemini-2.5-flash-lite`
+3. Start the server. It logs `AI summaries: Gemini models gemini-3.1-flash-lite -> gemini-3.5-flash-lite -> gemini-3.5-flash`
    (or `offline summaries only` when no key is set). The key itself is never printed.
 
 **Free-tier limits:** each model allows only about **5–10 requests per minute and 20 requests per day**. When a model answers

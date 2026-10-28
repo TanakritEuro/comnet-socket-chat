@@ -254,8 +254,11 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 - **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_summarize` + `summarize_worker` + `visible_since` (L317–368)
 - **Code snapshot 2:** `ai.py` → `summarize` (L90–111: model fallback loop) and `call_gemini` (L124–144: the HTTPS request, key in the `x-goog-api-key` header)
 - **Code snapshot 3:** `client.py` → `RoomTab.summarize` + `add_summary` (L350–365); `server.py` → `MessageBuffer` (L31–47: `deque(maxlen=50)` per room)
-- **AI model:** Google **Gemini 3 Flash** (`gemini-3-flash-preview`), falling back to **Gemini 2.5 Flash** (`gemini-2.5-flash`) and
-  **Gemini 2.5 Flash-Lite** (`gemini-2.5-flash-lite`). We found these IDs by calling the `models.list` endpoint once with our key.
+- **AI model:** Google **Gemini 3.1 Flash-Lite** (`gemini-3.1-flash-lite`), falling back to **Gemini 3.5 Flash-Lite** (`gemini-3.5-flash-lite`)
+  and **Gemini 3.5 Flash** (`gemini-3.5-flash`). We found these IDs by calling the `models.list` endpoint with our key. We first used
+  `gemini-3-flash-preview` with the 2.5 models as fallbacks, but the preview model was often overloaded (HTTP 503 / timeouts) and Google
+  answered 404 "no longer available to new users" for the 2.5 models. Only `gemini-3.1-flash-lite` has been tried with real requests (about 1 s per answer);
+  the two fallbacks are listed for our key but untested.
   - Reference: Gemini models, https://ai.google.dev/gemini-api/docs/models
   - API used: `generateContent` REST reference, https://ai.google.dev/api/generate-content
 - **Talking points:** the key never leaves the server; the AI call runs outside the lock, so chat keeps flowing while Gemini

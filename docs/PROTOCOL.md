@@ -60,7 +60,7 @@ TCP is a byte stream with no message boundaries, so every message is framed like
 | `FILE` | `room`, `from`, `filename`, `size`, `data`, `ts` | |
 | `HISTORY` | `room`, `messages: [MSG or FILE objects]` | Group history only includes messages from after the requester joined |
 | `TYPING` | `room`, `from`, `on` | |
-| `SUMMARY` | `room`, `text`, `model` | Sent **only to the requester**, usually a few seconds later. `model` = the Gemini model that answered (e.g. `gemini-3-flash-preview`) or `"offline"` when no AI was used (no key, no messages, or every model failed) |
+| `SUMMARY` | `room`, `text`, `model` | Sent **only to the requester**, usually a few seconds later. `model` = the Gemini model that answered (e.g. `gemini-3.1-flash-lite`) or `"offline"` when no AI was used (no key, no messages, or every model failed) |
 | `TRANSLATION` | `room`, `ts`, `to`, `source`, `text`, `model` | Sent **only to the requester**. `room` + `ts` name the original message, `source` is the detected language code (e.g. `th`), `text` the translation, `model` the Gemini model that answered |
 | `SENTIMENT_RESULT` | `room`, `ts`, `label`, `model` | Sent **only to the requester**. `label` is `positive`, `neutral` or `negative`. `model` is `"offline"` if a simple fallback was used instead of AI |
 | `BOT_REPLY` | `text`, `model`, `ts` | Sent **only to the asker**. `model` is `"offline"` with an explanatory `text` when no API key is set, so the demo never breaks |
@@ -126,13 +126,13 @@ S→*  {"type":"GROUPS","groups":[{"name":"netlab","creator":"alice","members":[
 C→S  {"type":"DM","to":"bob","text":"hi"}
 S→alice,bob  {"type":"MSG","room":"dm:alice|bob","from":"alice","text":"hi","ts":1793066669.5}
 C→S  {"type":"SUMMARIZE","room":"dm:alice|bob"}
-S→alice  {"type":"SUMMARY","room":"dm:alice|bob","text":"- alice greeted bob","model":"gemini-3-flash-preview"}
+S→alice  {"type":"SUMMARY","room":"dm:alice|bob","text":"- alice greeted bob","model":"gemini-3.1-flash-lite"}
 C→S  {"type":"TRANSLATE","room":"dm:alice|bob","ts":1793066669.5,"to":"th"}
-S→alice  {"type":"TRANSLATION","room":"dm:alice|bob","ts":1793066669.5,"to":"th","source":"en","text":"สวัสดี","model":"gemini-3-flash-preview"}
+S→alice  {"type":"TRANSLATION","room":"dm:alice|bob","ts":1793066669.5,"to":"th","source":"en","text":"สวัสดี","model":"gemini-3.1-flash-lite"}
 C→S  {"type":"SENTIMENT","room":"dm:alice|bob","ts":1793066669.5}
-S→alice  {"type":"SENTIMENT_RESULT","room":"dm:alice|bob","ts":1793066669.5,"label":"positive","model":"gemini-3-flash-preview"}
+S→alice  {"type":"SENTIMENT_RESULT","room":"dm:alice|bob","ts":1793066669.5,"label":"positive","model":"gemini-3.1-flash-lite"}
 C→S  {"type":"BOT_ASK","text":"How does TCP framing work?"}
-S→alice  {"type":"BOT_REPLY","text":"TCP is a byte stream, so ...","model":"gemini-3-flash-preview","ts":1793066700.1}
+S→alice  {"type":"BOT_REPLY","text":"TCP is a byte stream, so ...","model":"gemini-3.1-flash-lite","ts":1793066700.1}
 ```
 
 ## Security note (for the Q&A)
