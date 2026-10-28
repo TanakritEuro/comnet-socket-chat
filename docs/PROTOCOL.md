@@ -41,7 +41,7 @@ TCP is a byte stream with no message boundaries, so every message is framed like
 | `HISTORY` | `room` | Request past messages for a room you're allowed to see |
 | `TYPING` | `room`, `on` (bool) | Forwarded to the other room participants |
 | `FILE` | `room`, `filename`, `size`, `data` (base64) | Same routing/privacy rules as text. Max 5 MiB raw |
-| `SUMMARIZE` | `room` | AI summary of the room's recent history |
+| `SUMMARIZE` | `room` | AI summary of a room you can read: your own DM, or a group you're a member of (special 1). Uses the server's buffer (last 50 messages; for a group, only those sent after you joined). Errors: `BAD_REQUEST` (not a room id), `NO_SUCH_GROUP`, `NOT_MEMBER`, `BUSY` (your previous summary isn't finished) |
 | `BYE` | | optional clean disconnect |
 
 ## Server → Client
@@ -56,14 +56,22 @@ TCP is a byte stream with no message boundaries, so every message is framed like
 | `FILE` | `room`, `from`, `filename`, `size`, `data`, `ts` | |
 | `HISTORY` | `room`, `messages: [MSG or FILE objects]` | Group history only includes messages from after the requester joined |
 | `TYPING` | `room`, `from`, `on` | |
-| `SUMMARY` | `room`, `text`, `model` | `model` = Gemini model name or `"offline"` |
+| `SUMMARY` | `room`, `text`, `model` | Sent **only to the requester**, usually a few seconds later. `model` = the Gemini model that answered (e.g. `gemini-3-flash-preview`) or `"offline"` when no AI was used (no key, no messages, or every model failed) |
 | `NOTICE` | `text` | e.g. "bob joined", "bob left" |
 
 Before `WELCOME`, any message other than `HELLO` gets `ERROR BAD_REQUEST`. An unknown `type` after login also gets
 `ERROR BAD_REQUEST`, but the connection stays open.
 
-**Status:** `HISTORY`, `TYPING`, `FILE` and `SUMMARIZE` are Part 3 and not implemented yet. The server currently answers them
-with `ERROR BAD_REQUEST`.
+**Status:** `SUMMARIZE` / `SUMMARY` are implemented. `HISTORY`, `TYPING`, `FILE` and `NOTICE` are Part 3 and not implemented
+yet; the server currently answers them with `ERROR BAD_REQUEST`.
+
+## Message buffer
+
+The server keeps the last **50** delivered `MSG` objects of every room in memory (`MessageBuffer` in `server.py`, one
+`collections.deque(maxlen=50)` per room id). It is lost when the server restarts. Reading from it follows the delivery rules:
+a DM room only by its two participants, a group room only by current members, and only messages sent at or after the time
+that member joined (the server records join times on create/join and forgets them on leave). `SUMMARIZE` uses it today;
+`HISTORY` is meant to reuse the same buffer and the same check (`visible_since`).
 
 ## Login sequence
 
@@ -86,8 +94,9 @@ messages, and someone who reconnects with the same name is still in their groups
 | `NO_SUCH_GROUP` | join/leave/message a group that doesn't exist |
 | `GROUP_EXISTS` | `GROUP_CREATE` with a name already used by a group |
 | `ALREADY_MEMBER` | `GROUP_JOIN` on a group you're already in |
-| `NOT_MEMBER` | `GROUP_MSG` or `GROUP_LEAVE` on a group you're not in |
+| `NOT_MEMBER` | `GROUP_MSG` or `GROUP_LEAVE` on a group you're not in, or `SUMMARIZE` of a room you can't read |
 | `TOO_LARGE` | frame over 10 MiB (connection is closed) |
+| `BUSY` | `SUMMARIZE` while your previous summary is still being prepared |
 
 ## Example session
 
@@ -100,6 +109,8 @@ C→S  {"type":"GROUP_CREATE","group":"netlab"}
 S→*  {"type":"GROUPS","groups":[{"name":"netlab","creator":"alice","members":["alice"]}]}
 C→S  {"type":"DM","to":"bob","text":"hi"}
 S→alice,bob  {"type":"MSG","room":"dm:alice|bob","from":"alice","text":"hi","ts":1793066669.5}
+C→S  {"type":"SUMMARIZE","room":"dm:alice|bob"}
+S→alice  {"type":"SUMMARY","room":"dm:alice|bob","text":"- alice greeted bob","model":"gemini-3-flash-preview"}
 ```
 
 ## Security note (for the Q&A)

@@ -26,8 +26,9 @@ a **simple chat application built with socket programming**. Group of 4 students
 | AI feature | Chat summarization through the Google Gemini REST API, called **from the server** with `urllib.request` over HTTPS | Keeps the API key on the server only. If no key is set, fall back to a simple offline summary so the demo never breaks |
 | Dependencies | **Standard library only** (optionally `python-dotenv`, but parsing `.env` by hand is fine) | Zero setup on lab machines |
 
-Target the `gemini-2.5-flash` model by default, read from the env var `GEMINI_MODEL`. Check the current
-model name and REST endpoint in Google's docs before implementing.
+Default model `gemini-3-flash-preview` (env `GEMINI_MODEL`), then `gemini-2.5-flash` and `gemini-2.5-flash-lite`
+(env `GEMINI_FALLBACK_MODELS`, comma-separated) on HTTP 429/404/503. The free tier is tiny (5–10 requests/min, 20/day
+per model), so tests and `scripts/e2e_gui_check.py` must mock the HTTP call or force offline mode. Never make real calls in tests.
 
 ## Planned layout
 
@@ -35,7 +36,7 @@ model name and REST endpoint in Google's docs before implementing.
 server.py            # TCP server: accepts clients, routes messages, enforces privacy
 client.py            # Tkinter GUI client
 protocol.py          # shared: send_msg / recv_msg framing, message type constants
-ai.py                # summarize(messages) -> str  (Gemini + offline fallback)
+ai.py                # summarize(room, messages) -> (text, model)  (Gemini + offline fallback)
 tests/               # scripted socket clients that test the server headlessly
 docs/SPEC.md         # assignment requirements
 docs/PROTOCOL.md     # message format: source of truth for client <-> server

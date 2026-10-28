@@ -32,6 +32,7 @@ GROUP_CREATE = "GROUP_CREATE"   # {"group"}                creator becomes the o
 GROUP_JOIN = "GROUP_JOIN"       # {"group"}                adds the sender only (R10)
 GROUP_LEAVE = "GROUP_LEAVE"     # {"group"}
 GROUP_MSG = "GROUP_MSG"         # {"group", "text"}        members only (R11)
+SUMMARIZE = "SUMMARIZE"         # {"room"}                 AI summary of a room you can see (special 1)
 BYE = "BYE"                     # {}                       clean disconnect
 
 # Server -> Client
@@ -40,6 +41,7 @@ ERROR = "ERROR"                 # {"code", "message"}
 USERS = "USERS"                 # {"users": [...]}         everyone online, including you (R4)
 GROUPS = "GROUPS"               # {"groups": [{"name", "creator", "members"}]}   (R9)
 MSG = "MSG"                     # {"room", "from", "text", "ts"}
+SUMMARY = "SUMMARY"             # {"room", "text", "model"}   only to the requester
 
 # ERROR codes
 NAME_TAKEN = "NAME_TAKEN"
@@ -51,6 +53,7 @@ GROUP_EXISTS = "GROUP_EXISTS"
 ALREADY_MEMBER = "ALREADY_MEMBER"
 NOT_MEMBER = "NOT_MEMBER"
 TOO_LARGE = "TOO_LARGE"
+BUSY = "BUSY"
 
 
 class ProtocolError(Exception):
