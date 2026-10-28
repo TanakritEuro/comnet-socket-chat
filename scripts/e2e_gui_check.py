@@ -149,8 +149,8 @@ def main():
     dm.entry.insert(0, "hi bob, private")
     dm.send()
     check("R5  bob gets his own @alice tab", wait_until(root, lambda: "dm:alice|bob" in bob.rooms))
-    check("R7  bob's tab shows the DM", wait_until(root, lambda: "alice: hi bob, private" in text_of(bob.rooms["dm:alice|bob"])))
-    check("R6  alice's window shows her own message", "alice: hi bob, private" in text_of(dm))
+    check("R7  bob's tab shows the DM", wait_until(root, lambda: "hi bob, private" in text_of(bob.rooms["dm:alice|bob"])))
+    check("R6  alice's window shows her own message", "hi bob, private" in text_of(dm))
     check("R6  chat box is cleared after Send", dm.entry.get() == "")
     check("R6  chat window is read-only", str(dm.window.cget("state")) == "disabled")
 
@@ -177,8 +177,58 @@ def main():
     group_tab = alice.rooms["group:net lab"]
     group_tab.entry.insert(0, "hello group")
     group_tab.send()
-    check("R11 bob sees the group message", wait_until(root, lambda: "alice: hello group" in text_of(bob.rooms["group:net lab"])))
+    check("R11 bob sees the group message", wait_until(root, lambda: "hello group" in text_of(bob.rooms["group:net lab"])))
     check("R7/R11 carol received no chat message", not any(m["type"] == MSG for m in raw_messages(carol)))
+
+    # AI shell: the buttons exist, their stubs are harmless, and the result methods the features will call work.
+    # (No real AI feature is connected yet, so these call the tab's result methods directly.)
+    bob_dm = bob.rooms["dm:alice|bob"]
+    alice_ts = next(iter(bob_dm.by_ts))
+    check("AI  sidebar shows the Assistant row and the user count",
+          "AI Assistant" in alice.assistant_list.get(0) and alice.users_label.cget("text").startswith("ONLINE USERS · 3"))
+    check("AI  group tab header lists the members", "bob (creator)" in group_tab.subtitle.cget("text"))
+    check("AI  own message has an Analyze mood button but no Translate link",
+          bool(dm.window.tag_ranges("mood_button")) and not dm.window.tag_ranges("link"))
+    check("AI  alice's message has both controls in bob's tab",
+          bool(bob_dm.window.tag_ranges("mood_button")) and bool(bob_dm.window.tag_ranges("link")))
+    check("AI  'Translate to' picker starts on English", bob_dm.language_box.get() == "English" and bob_dm.language_code() == "en")
+    bob.notebook.select(bob_dm)
+    wait_until(root, lambda: False, timeout=0.3)
+    x, y, *_ = bob_dm.window.bbox(bob_dm.window.tag_ranges("link")[0])
+    bob_dm.window.event_generate("<Motion>", x=x + 3, y=y + 3)         # Tk decides which tag is under the mouse on Motion
+    bob_dm.window.event_generate("<Button-1>", x=x + 3, y=y + 3)       # a real click on the Translate link
+    check("AI  clicking Translate without a feature shows a notice and keeps the link",
+          wait_until(root, lambda: "Translation isn't available yet." in text_of(bob_dm)) and bool(bob_dm.window.tag_ranges("link")))
+    bob_dm.analyze(alice_ts)
+    check("AI  Analyze mood without a feature shows a notice", "Mood analysis isn't available yet." in text_of(bob_dm))
+    bob_dm.show_translating(alice_ts)
+    check("AI  'Translating…' replaces the link", "Translating…" in text_of(bob_dm) and not bob_dm.window.tag_ranges("link"))
+    bob_dm.add_translation(alice_ts, "สวัสดี", "en", "th")
+    check("AI  translated block appears", "Translated · English → Thai" in text_of(bob_dm) and "สวัสดี" in text_of(bob_dm))
+    bob_dm.translation_failed(alice_ts)
+    check("AI  translation error offers Try again",
+          "Couldn't translate this message." in text_of(bob_dm) and bool(bob_dm.window.tag_ranges("link")))
+    bob_dm.show_mood_pending(alice_ts)
+    check("AI  'Analyzing…' replaces the button", "Analyzing…" in text_of(bob_dm) and not bob_dm.window.tag_ranges("mood_button"))
+    bob_dm.set_mood(alice_ts, "positive")
+    check("AI  mood pill replaces the button", "● Positive" in text_of(bob_dm) and bool(bob_dm.window.tag_ranges("mood_positive")))
+    bot = alice.open_bot()
+    check("AI  AI Assistant tab opens", alice.bot_tab is bot and alice.notebook.select() == str(bot))
+    bot.entry.insert(0, "what is TCP?")
+    bot.ask()
+    check("AI  asking without a feature keeps the question and shows a notice",
+          bot.entry.get() == "what is TCP?" and "The assistant isn't available yet." in text_of(bot))
+    bot.entry.delete(0, "end")
+    bot.add_question("what is TCP?")
+    bot.show_thinking()
+    check("AI  'Thinking…' disables Ask", "Thinking…" in text_of(bot) and bot.ask_button.instate(["disabled"]))
+    bot.add_reply("TCP is a byte stream.", "offline")
+    check("AI  reply replaces 'Thinking…' and Ask is enabled again",
+          "TCP is a byte stream." in text_of(bot) and "Thinking…" not in text_of(bot) and bot.ask_button.instate(["!disabled"]))
+    check("AI  offline reply is labelled", "Offline reply · no AI was used" in text_of(bot))
+    bot.clear()
+    check("AI  Clear conversation wipes the tab", "TCP is a byte stream." not in text_of(bot) and "Conversation cleared." in text_of(bot))
+    alice.notebook.select(group_tab)
 
     # Special 1: alice clicks Summarize in the group tab (offline summarizer, so no API quota is used)
     group_tab.summarize_button.invoke()
