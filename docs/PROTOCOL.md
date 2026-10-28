@@ -75,8 +75,8 @@ Before `WELCOME`, any message other than `HELLO` gets `ERROR BAD_REQUEST`. An un
 The chatbot is **not a room**: `BOT_ASK` / `BOT_REPLY` never use a room id, are never written to the message buffer
 and are never sent to anyone but the asker. UI and per-feature details: [`AI_FEATURES.md`](AI_FEATURES.md).
 
-**Status:** `SUMMARIZE` / `SUMMARY` are implemented. `TRANSLATE`, `SENTIMENT`, `BOT_ASK` and `BOT_CLEAR` with their
-replies are **specified here but not implemented yet**; until then the server answers them with `ERROR BAD_REQUEST`. `HISTORY`, `TYPING`, `FILE` and `NOTICE` are Part 3 and not implemented
+**Status:** `SUMMARIZE` / `SUMMARY` and `BOT_ASK` / `BOT_CLEAR` / `BOT_REPLY` are implemented. `TRANSLATE` and `SENTIMENT` with
+their replies are **specified here but not implemented yet**; until then the server answers them with `ERROR BAD_REQUEST`. `HISTORY`, `TYPING`, `FILE` and `NOTICE` are Part 3 and not implemented
 yet; the server currently answers them with `ERROR BAD_REQUEST`.
 
 ## Message buffer
