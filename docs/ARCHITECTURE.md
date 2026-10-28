@@ -32,7 +32,8 @@ flowchart LR
 ```
 
 - The IP addresses are examples. On the day, read the server's address from `ipconfig` (see the README's demo section).
-- The Gemini call (①, ②) is **planned** for Special 1 and isn't implemented yet.
+- The Gemini call (①, ②) happens only when someone presses **Summarize** (Special 1). The server makes it from a worker
+  thread, so chat keeps flowing while Gemini answers.
 - The server listens on `0.0.0.0:5050`, which means "port 5050 on every network interface of this PC".
 - Only the **server** talks to Gemini, so the API key never leaves the server machine.
 
@@ -49,6 +50,7 @@ flowchart LR
     T1 <-->|"with lock"| ST[("shared state<br/>clients: name → socket<br/>groups: name → members")]
     T2 <-->|"with lock"| ST
     T1 -.->|"send_msg() to bob's socket<br/>(while holding lock)"| BS(["bob's socket<br/>(TCP to bob's PC)"])
+    T2 -->|"SUMMARIZE:<br/>start a worker"| W["summary worker thread<br/>ai.summarize()<br/>HTTPS to Gemini<br/>(no lock held)"]
 ```
 
 **Client (`client.py`, one per user):**
@@ -67,6 +69,8 @@ flowchart LR
 - **Any** server thread may write to a client's socket (the dashed arrow). When alice sends bob a DM, it's *alice's* thread that
   writes to *bob's* socket, while bob's own thread may be writing to it at the same moment. So sends also happen under the
   lock; otherwise two threads could interleave the bytes of two frames on one socket.
+- **Summary worker (Special 1):** a `SUMMARIZE` request starts a short-lived worker thread that calls Gemini **without**
+  holding the lock (it can take seconds), then takes the lock just to send the `SUMMARY` back to the requester.
 - **Client:** Tkinter is not thread-safe, so only the main thread touches widgets. The receiver thread just
   blocks in `recv()` and puts messages on a queue, which the main thread drains with `root.after()`. The GUI never freezes
   while waiting for the network.
@@ -224,7 +228,7 @@ Full spec: [`docs/PROTOCOL.md`](PROTOCOL.md). Code: `protocol.py`.
 
 ### HTTPS / TLS (for the AI summarization feature)
 
-*Planned for Special 1 (`ai.py`, not written yet). Confirm the exact Gemini endpoint against Google's docs when implementing.*
+Used by Special 1, AI chat summarization (`ai.py`).
 
 - **What:** **TLS** (Transport Layer Security) runs on top of TCP and adds **encryption** (nobody on the path can read
   the data), **integrity** (nobody can change it unnoticed) and **server authentication** (the certificate proves we're really
@@ -236,12 +240,20 @@ Full spec: [`docs/PROTOCOL.md`](PROTOCOL.md). Code: `protocol.py`.
   - We call it **from the server**, so the key lives only in the server's `.env` and is never sent to clients.
   - Python's `urllib.request` does HTTPS with the standard-library `ssl` module and verifies Google's certificate and
     host name by default, so there's nothing extra to install.
-- **How (planned):**
-  - A client sends `SUMMARIZE {room}` over our normal TCP protocol. The server checks the requester may see that room, then
-    sends an HTTPS `POST` to `generativelanguage.googleapis.com` (model from `GEMINI_MODEL`, default `gemini-2.5-flash`), with
-    the API key in a request header and the room's recent messages in a JSON body.
-  - The answer goes back to the client as `SUMMARY {room, text, model}`. If there's no key or no Internet, the
-    server makes a simple offline summary instead, so the demo never breaks.
+- **How:**
+  - A client sends `SUMMARIZE {room}` over our normal TCP protocol. The server checks that the requester may read that room
+    (their own DM, or a group they're in), takes that room's last 50 messages from its in-memory buffer, and starts a worker thread.
+  - The worker (`ai.call_gemini`) sends an HTTPS `POST` to
+    `https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent`. The API key goes in the
+    `x-goog-api-key` **header** (never in the URL), and the transcript goes in a JSON body
+    (`{"systemInstruction": …, "contents": [{"parts": [{"text": …}]}]}`). The timeout is 15 s.
+  - Models: `gemini-3-flash-preview` first, then `gemini-2.5-flash`, then `gemini-2.5-flash-lite` (from `GEMINI_MODEL` /
+    `GEMINI_FALLBACK_MODELS`). HTTP 429 (rate limit), 404 (no such model) or 503 (overloaded) → try the next one.
+  - The reply text is in `candidates[0].content.parts[].text`. It goes back to the requester only, as `SUMMARY {room, text, model}`.
+    If there's no key, no messages, or no model works, the server sends an offline summary (`model: "offline"`), so the demo
+    never breaks.
+  - In Wireshark you see only a TLS handshake to `generativelanguage.googleapis.com` and then encrypted *Application Data*:
+    neither the key nor the chat text is readable, unlike our own plain-text chat protocol.
 
 ### Why not …?
 

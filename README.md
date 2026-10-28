@@ -22,6 +22,24 @@ python server.py --host 0.0.0.0 --port 5050
 python client.py            # enter the server's IP, port 5050, and a unique name
 ```
 
+## AI summaries (Gemini)
+
+Each chat tab has a **Summarize** button. The **server** asks Google Gemini to summarize that room and shows the result only to
+you. Without a key (or if Gemini is unreachable) you get an **offline summary** instead: message count, who spoke, and the last few lines.
+
+Set up on the **server machine only**:
+
+1. Get a free API key at https://aistudio.google.com/apikey.
+2. `cp .env.example .env` (PowerShell: `Copy-Item .env.example .env`) and paste the key after `GEMINI_API_KEY=`.
+   `.env` is git-ignored. Never commit it, and never put the key on a client PC.
+3. Start the server. It logs `AI summaries: Gemini models gemini-3-flash-preview -> gemini-2.5-flash -> gemini-2.5-flash-lite`
+   (or `offline summaries only` when no key is set). The key itself is never printed.
+
+**Free-tier limits:** each model allows only about **5–10 requests per minute and 20 requests per day**. When a model answers
+HTTP 429 (rate limit), 404 or 503, the server tries the next model in `GEMINI_FALLBACK_MODELS`. If all fail, you get the offline
+summary. Each click is one request, so don't click Summarize for fun before the demo. The tests and `scripts/e2e_gui_check.py`
+never call the real API.
+
 ## How to demo on 2+ computers
 
 R1 requires **at least two clients on different physical computers**. The server can run on a third PC or on one of them.
@@ -82,6 +100,7 @@ python client.py --host 192.168.1.20 --name alice     # or just: python client.p
 | bob clicks **Create…** → `netlab`; everyone sees it with only bob in it | R8, R9 |
 | alice selects `netlab` → **Join**; member lists update everywhere | R9, R10 |
 | alice and bob chat in `#netlab`; carol (not a member) sees nothing | R11 |
+| alice presses **Summarize** in `#netlab`; only alice sees the AI summary | Special 1 |
 | Optional: Wireshark on the server PC with filter `tcp.port == 5050` | TCP handshake, 4-byte length + JSON on the wire |
 
 **Troubleshooting**
@@ -120,7 +139,7 @@ python scripts/e2e_gui_check.py --screenshot e2e.png   # same, plus a picture of
 
 `scripts/e2e_gui_check.py` starts a server on a free port, logs in `alice` and `bob` through the real login screen,
 connects a raw-socket `carol`, and drives the widgets in code: DM, create/join/leave a group, group message, a duplicate
-name, and a duplicate group. It checks what each window shows, and that `carol` (no GUI, not a member) gets no chat message at all.
+name, a duplicate group, and **Summarize** (forced offline, so it never uses API quota). It checks what each window shows, and that `carol` (no GUI, not a member) gets no chat message at all.
 Message boxes are recorded instead of shown, so it never waits for a click. **Rerun it after every PR that touches
 `client.py` or the protocol**; it exits non-zero if any check fails. Don't move the mouse into the windows while it runs.
 

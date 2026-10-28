@@ -4,22 +4,30 @@ Each test starts a fresh server, so tests don't share any users or groups.
 Run all tests with:  python -m unittest discover -s tests -v
 """
 
+import io
+import json
+import logging
 import os
 import socket
 import struct
 import sys
 import threading
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # so "import server" works from any folder
 
+import ai
 from protocol import (
-    ALREADY_MEMBER, BAD_NAME, BAD_REQUEST, DM, ERROR, GROUP_CREATE, GROUP_EXISTS, GROUP_JOIN,
+    ALREADY_MEMBER, BAD_NAME, BAD_REQUEST, BUSY, DM, ERROR, GROUP_CREATE, GROUP_EXISTS, GROUP_JOIN,
     GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO, MSG, NAME_TAKEN, NO_SUCH_GROUP, NO_SUCH_USER,
-    NOT_MEMBER, USERS, WELCOME, recv_msg, send_msg,
+    NOT_MEMBER, SUMMARIZE, SUMMARY, USERS, WELCOME, recv_msg, send_msg,
 )
 from server import ChatServer
+
+logging.getLogger("ai").addHandler(logging.NullHandler())   # keep expected warnings off the console
 
 TIMEOUT = 2.0       # seconds to wait for a message we expect
 QUIET_TIME = 0.3    # seconds to listen when checking that a message does NOT arrive
@@ -30,6 +38,7 @@ class TestClient:
 
     def __init__(self, port):
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT)
+        self.received = []                  # every message this client has read, for leak checks
 
     def send(self, type_, **fields):
         send_msg(self.sock, {"type": type_, **fields})
@@ -41,6 +50,7 @@ class TestClient:
                 msg = recv_msg(self.sock)
                 if msg is None:
                     raise AssertionError(f"server closed the connection while waiting for {type_}")
+                self.received.append(msg)
                 if msg["type"] == type_ and all(msg.get(k) == v for k, v in fields.items()):
                     return msg
         except socket.timeout:
@@ -54,6 +64,7 @@ class TestClient:
                 msg = recv_msg(self.sock)
                 if msg is None:
                     return
+                self.received.append(msg)
                 if msg["type"] == type_:
                     raise AssertionError(f"should not have received: {msg}")
         except socket.timeout:
@@ -76,11 +87,18 @@ class TestClient:
         self.sock.close()
 
 
+def offline_summarizer(room, messages):
+    """Default for test servers: never read the real .env key, never call the real API."""
+    return ai.summarize(room, messages, ai.Config(api_key="", models=[]))
+
+
 class ServerTestCase(unittest.TestCase):
     """Starts a fresh server on a free port before each test."""
 
+    summarizer = staticmethod(offline_summarizer)
+
     def setUp(self):
-        self.server = ChatServer("127.0.0.1", 0)    # port 0: the OS picks a free port
+        self.server = ChatServer("127.0.0.1", 0, summarizer=self.summarizer)   # port 0: OS picks a free port
         self.port = self.server.start()
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.clients = []
@@ -295,6 +313,122 @@ class R11GroupMessageTests(ServerTestCase):
     def test_message_to_missing_group(self):
         self.alice.send(GROUP_MSG, group="missing", text="hi")
         self.assertEqual(self.alice.wait_for(ERROR)["code"], NO_SUCH_GROUP)
+
+
+class Special1SummarizeTests(ServerTestCase):
+    """AI summaries: privacy checks, requester-only replies, and no key leaks. The AI itself is faked."""
+
+    def setUp(self):
+        self.calls = []                     # (room, [texts]) the summarizer was asked about
+        self.release = threading.Event()
+        self.release.set()                  # set = answer immediately; clear() to make it "slow"
+        super().setUp()
+        self.alice = self.connect("alice")
+        self.bob = self.connect("bob")
+        self.carol = self.connect("carol")
+
+    def summarizer(self, room, messages):
+        self.calls.append((room, [m["text"] for m in messages]))
+        self.release.wait(TIMEOUT)
+        return f"{len(messages)} messages", "fake-model"
+
+    def test_summary_goes_only_to_the_requester(self):
+        self.alice.send(DM, to="bob", text="secret plan")
+        self.bob.wait_for(MSG, text="secret plan")
+        self.alice.send(SUMMARIZE, room="dm:alice|bob")
+        reply = self.alice.wait_for(SUMMARY)
+        self.assertEqual(reply, {"type": SUMMARY, "room": "dm:alice|bob", "text": "1 messages", "model": "fake-model"})
+        self.assertEqual(self.calls, [("dm:alice|bob", ["secret plan"])])
+        self.bob.assert_no(SUMMARY)
+        self.carol.assert_no(SUMMARY)
+
+    def test_non_member_cannot_summarize_a_group(self):
+        self.create_group(self.alice, "netlab")
+        self.alice.send(GROUP_MSG, group="netlab", text="members only")
+        self.alice.wait_for(MSG, text="members only")
+        self.carol.send(SUMMARIZE, room="group:netlab")
+        self.assertEqual(self.carol.wait_for(ERROR)["code"], NOT_MEMBER)
+        self.carol.assert_no(SUMMARY)
+        self.assertEqual(self.calls, [])            # the AI never saw the group's messages
+
+    def test_cannot_summarize_someone_elses_dm(self):
+        self.alice.send(DM, to="bob", text="just us")
+        self.bob.wait_for(MSG, text="just us")
+        self.carol.send(SUMMARIZE, room="dm:alice|bob")
+        self.assertEqual(self.carol.wait_for(ERROR)["code"], NOT_MEMBER)
+        self.assertEqual(self.calls, [])
+
+    def test_bad_room_ids(self):
+        for room, code in [("lobby", BAD_REQUEST), (None, BAD_REQUEST), ("group:missing", NO_SUCH_GROUP)]:
+            self.alice.send(SUMMARIZE, room=room)
+            self.assertEqual(self.alice.wait_for(ERROR)["code"], code, room)
+
+    def test_late_joiner_only_gets_messages_from_after_joining(self):
+        self.create_group(self.alice, "netlab")
+        self.alice.send(GROUP_MSG, group="netlab", text="before bob joined")
+        self.alice.wait_for(MSG, text="before bob joined")
+        self.bob.send(GROUP_JOIN, group="netlab")
+        self.alice.wait_for(GROUPS, groups=[{"name": "netlab", "creator": "alice", "members": ["alice", "bob"]}])
+        self.alice.send(GROUP_MSG, group="netlab", text="after bob joined")
+        self.bob.wait_for(MSG, text="after bob joined")
+        self.bob.send(SUMMARIZE, room="group:netlab")
+        self.bob.wait_for(SUMMARY)
+        self.assertEqual(self.calls, [("group:netlab", ["after bob joined"])])
+
+    def test_buffer_keeps_only_the_last_50_messages(self):
+        for i in range(55):
+            self.alice.send(DM, to="bob", text=f"m{i}")
+        self.bob.wait_for(MSG, text="m54")
+        self.alice.send(SUMMARIZE, room="dm:alice|bob")
+        self.alice.wait_for(SUMMARY)
+        texts = self.calls[0][1]
+        self.assertEqual((len(texts), texts[0], texts[-1]), (50, "m5", "m54"))
+
+    def test_server_keeps_serving_while_the_ai_is_slow(self):
+        self.release.clear()                        # the fake AI now blocks until we release it
+        self.alice.send(DM, to="bob", text="hello")
+        self.bob.wait_for(MSG, text="hello")
+        self.alice.send(SUMMARIZE, room="dm:alice|bob")
+        self.alice.send(SUMMARIZE, room="dm:alice|bob")
+        self.assertEqual(self.alice.wait_for(ERROR)["code"], BUSY)   # one summary at a time per user
+        self.bob.send(DM, to="alice", text="still chatting")         # handled while the AI "thinks"
+        self.alice.wait_for(MSG, text="still chatting")
+        self.release.set()
+        self.alice.wait_for(SUMMARY)
+
+
+class Special1KeyLeakTests(ServerTestCase):
+    """Real ai.summarize with a fake key and a mocked HTTP layer: the key must never reach a client."""
+
+    KEY = "TEST-SECRET-KEY-123"
+
+    def summarizer(self, room, messages):
+        return ai.summarize(room, messages, ai.Config(api_key=self.KEY, models=["model-a", "model-b"]))
+
+    def summarize_with(self, urlopen_result):
+        alice, bob = self.connect("alice"), self.connect("bob")
+        alice.send(DM, to="bob", text="hi")
+        bob.wait_for(MSG, text="hi")
+        with mock.patch("ai.urllib.request.urlopen", side_effect=urlopen_result) as urlopen:
+            alice.send(SUMMARIZE, room="dm:alice|bob")
+            reply = alice.wait_for(SUMMARY)
+        everything = json.dumps(alice.received + bob.received)
+        self.assertNotIn(self.KEY, everything)
+        for call in urlopen.call_args_list:         # and the key only ever travels in the header
+            self.assertNotIn(self.KEY, call.args[0].full_url)
+        return reply
+
+    def test_key_not_leaked_on_success(self):
+        body = {"candidates": [{"content": {"parts": [{"text": "- alice said hi"}]}}]}
+        response = mock.MagicMock()
+        response.__enter__.return_value = io.BytesIO(json.dumps(body).encode())
+        self.assertEqual(self.summarize_with([response])["model"], "model-a")
+
+    def test_key_not_leaked_when_every_model_fails(self):
+        errors = [urllib.error.HTTPError("https://example.invalid", 429, f"quota for {self.KEY}", {}, io.BytesIO())
+                  for _ in range(2)]
+        reply = self.summarize_with(errors)
+        self.assertEqual(reply["model"], ai.OFFLINE)
 
 
 class RobustnessTests(ServerTestCase):

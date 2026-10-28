@@ -23,8 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # so "import c
 
 import tkinter as tk
 
+import ai
 import client
-from protocol import HELLO, MSG, recv_msg, send_msg
+from protocol import HELLO, MSG, SUMMARY, recv_msg, send_msg
 from server import ChatServer
 
 TIMEOUT = 3.0           # seconds to wait for the GUI to show something
@@ -83,6 +84,11 @@ def text_of(tab):
     return tab.window.get("1.0", "end")
 
 
+def offline_summarizer(room, messages):
+    """Force the offline summary: the e2e check must never use the real API quota or read the .env key."""
+    return ai.summarize(room, messages, ai.Config(api_key="", models=[]))
+
+
 def screenshot(windows, path):
     """Save a PNG covering the given windows (Windows only: PowerShell + .NET do the capture)."""
     left = min(w.winfo_rootx() for w in windows) - 10
@@ -111,7 +117,7 @@ def main():
         ctypes.windll.shcore.SetProcessDpiAwareness(1)    # same as client.main(), so sizes match a real run
     record_popups()
 
-    server = ChatServer("127.0.0.1", 0)                     # port 0: the OS picks a free port
+    server = ChatServer("127.0.0.1", 0, summarizer=offline_summarizer)   # port 0: the OS picks a free port
     port = server.start()
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
@@ -173,6 +179,18 @@ def main():
     group_tab.send()
     check("R11 bob sees the group message", wait_until(root, lambda: "alice: hello group" in text_of(bob.rooms["group:net lab"])))
     check("R7/R11 carol received no chat message", not any(m["type"] == MSG for m in raw_messages(carol)))
+
+    # Special 1: alice clicks Summarize in the group tab (offline summarizer, so no API quota is used)
+    group_tab.summarize_button.invoke()
+    check("S1  Summarize button disables while waiting", group_tab.summarize_button.instate(["disabled"]))
+    check("S1  summary appears in alice's group tab",
+          wait_until(root, lambda: "Offline summary · no AI was used" in text_of(group_tab)))
+    check("S1  summary is a marked system block", bool(group_tab.window.tag_ranges("summary_title")))
+    check("S1  summary describes the room", "1 message from 1 person: alice" in text_of(group_tab))
+    check("S1  Summarize button is enabled again", group_tab.summarize_button.instate(["!disabled"]))
+    wait_until(root, lambda: False, timeout=0.3)
+    check("S1  bob's window shows no summary", "Summary of this room" not in text_of(bob.rooms["group:net lab"]))
+    check("S1  carol received no SUMMARY", not any(m["type"] == SUMMARY for m in raw_messages(carol)))
 
     # Server errors reach the user
     bob.create_group()                                      # "net lab" again

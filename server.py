@@ -12,17 +12,39 @@ import os
 import socket
 import threading
 import time
+from collections import defaultdict, deque
 
+import ai
 from protocol import (
-    ALREADY_MEMBER, BAD_NAME, BAD_REQUEST, BYE, DM, ERROR, GROUP_CREATE, GROUP_EXISTS,
+    ALREADY_MEMBER, BAD_NAME, BAD_REQUEST, BUSY, BYE, DM, ERROR, GROUP_CREATE, GROUP_EXISTS,
     GROUP_JOIN, GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO, MAX_NAME_LEN, MSG, NAME_TAKEN,
-    NO_SUCH_GROUP, NO_SUCH_USER, NOT_MEMBER, USERS, WELCOME,
+    NO_SUCH_GROUP, NO_SUCH_USER, NOT_MEMBER, SUMMARIZE, SUMMARY, USERS, WELCOME,
     ProtocolError, clean_name, dm_room, group_room, recv_msg, send_msg,
 )
 
 log = logging.getLogger("server")
 
 NAME_RULES = f"must be 1-{MAX_NAME_LEN} characters and must not contain '|'"
+BUFFER_SIZE = 50        # messages kept per room
+
+
+class MessageBuffer:
+    """The last BUFFER_SIZE chat messages of every room, in memory only (lost on restart).
+
+    Stores the exact MSG dicts that were delivered, so the planned HISTORY reply can send
+    them back unchanged. Today it feeds AI summaries. Caller must hold ChatServer.lock.
+    """
+
+    def __init__(self, size=BUFFER_SIZE):
+        # deque(maxlen=N) drops the oldest message automatically when a new one arrives.
+        self.rooms = defaultdict(lambda: deque(maxlen=size))
+
+    def add(self, msg):
+        self.rooms[msg["room"]].append(msg)
+
+    def recent(self, room, since=0.0):
+        """Messages of a room sent at or after `since` (a Unix time), oldest first."""
+        return [m for m in self.rooms.get(room, ()) if m["ts"] >= since]
 
 
 class ChatServer:
@@ -37,12 +59,16 @@ class ChatServer:
     send buffer fills up. That is acceptable for a classroom chat.
     """
 
-    def __init__(self, host="0.0.0.0", port=5050):
+    def __init__(self, host="0.0.0.0", port=5050, summarizer=ai.summarize):
         self.host = host
         self.port = port
         self.lock = threading.Lock()
         self.clients = {}   # name -> socket of that client's TCP connection
-        self.groups = {}    # group name -> {"creator": name, "members": [names, in join order]}
+        self.groups = {}    # group name -> {"creator": name, "members": [names, in join order],
+                            #                "joined": {name: Unix time they joined}}
+        self.buffer = MessageBuffer()
+        self.summarizer = summarizer    # function(room, messages) -> (text, model); tests swap in a fake
+        self.summarizing = set()        # names with a summary in progress (protects the tiny API quota)
         self.listen_sock = None
         self.running = False
         # Which method handles which message type (after login).
@@ -52,6 +78,7 @@ class ChatServer:
             GROUP_JOIN: self.handle_group_join,
             GROUP_LEAVE: self.handle_group_leave,
             GROUP_MSG: self.handle_group_msg,
+            SUMMARIZE: self.handle_summarize,
         }
 
     # ------------------------------------------------------------------
@@ -221,6 +248,7 @@ class ChatServer:
             if not isinstance(to, str) or to not in self.clients:
                 return self.send_error(me, NO_SUCH_USER, f"{to!r} is not online")
             out = {"type": MSG, "room": dm_room(name, to), "from": name, "text": text, "ts": time.time()}
+            self.buffer.add(out)
             # Privacy is decided here: no other client's socket is ever written to.
             self.send(me, out)                  # echo, so the sender's window shows it too
             self.send(self.clients[to], out)
@@ -234,7 +262,8 @@ class ChatServer:
                 return self.send_error(me, BAD_NAME, f"group name {NAME_RULES}")
             if group in self.groups:
                 return self.send_error(me, GROUP_EXISTS, f"group {group!r} already exists")
-            self.groups[group] = {"creator": name, "members": [name]}   # nobody else is added
+            # Nobody else is added. "joined" lets summaries (and later HISTORY) skip older messages.
+            self.groups[group] = {"creator": name, "members": [name], "joined": {name: time.time()}}
             self.broadcast_groups()
 
     def handle_group_join(self, name, msg):
@@ -249,6 +278,7 @@ class ChatServer:
             if name in info["members"]:
                 return self.send_error(me, ALREADY_MEMBER, f"you are already in {group!r}")
             info["members"].append(name)
+            info["joined"][name] = time.time()
             self.broadcast_groups()
 
     def handle_group_leave(self, name, msg):
@@ -262,6 +292,7 @@ class ChatServer:
             if name not in info["members"]:
                 return self.send_error(me, NOT_MEMBER, f"you are not in {group!r}")
             info["members"].remove(name)
+            del info["joined"][name]
             self.broadcast_groups()
 
     def handle_group_msg(self, name, msg):
@@ -278,9 +309,63 @@ class ChatServer:
             if not is_text(text):
                 return self.send_error(me, BAD_REQUEST, "text must be a non-empty string")
             out = {"type": MSG, "room": group_room(group), "from": name, "text": text, "ts": time.time()}
+            self.buffer.add(out)
             for member in info["members"]:
                 if member in self.clients:      # members who are offline right now miss it
                     self.send(self.clients[member], out)
+
+    def handle_summarize(self, name, msg):
+        """Special 1: AI summary of a room the sender can see, sent back to the sender only.
+
+        The Gemini call can take seconds, so it runs in a worker thread *outside* the lock:
+        everyone keeps chatting while we wait, including the requester.
+        """
+        room = msg.get("room")
+        with self.lock:
+            me = self.clients[name]
+            since = self.visible_since(me, name, room)
+            if since is None:
+                return                          # an ERROR was already sent
+            if name in self.summarizing:
+                return self.send_error(me, BUSY, "your previous summary is still being prepared")
+            self.summarizing.add(name)
+            messages = self.buffer.recent(room, since)
+        threading.Thread(target=self.summarize_worker, args=(name, me, room, messages), daemon=True).start()
+
+    def summarize_worker(self, name, sock, room, messages):
+        """Worker thread: ask the AI (slow, no lock held), then reply to the requester only."""
+        try:
+            text, model = self.summarizer(room, messages)
+        except Exception:                       # a bug must not leave the user waiting forever
+            log.exception("summarizer crashed")
+            text, model = ai.offline_summary(messages, "summarizer error"), ai.OFFLINE
+        with self.lock:
+            self.summarizing.discard(name)
+            if self.clients.get(name) is sock:  # still the same connection (not gone, not a new login)
+                self.send(sock, {"type": SUMMARY, "room": room, "text": text, "model": model})
+        log.info("summary for %s in %s: %d messages, model %s", name, room, len(messages), model)
+
+    def visible_since(self, sock, name, room):
+        """Privacy check for reading a room's past messages (same rules as delivery, R7/R11).
+
+        Returns the Unix time from which `name` may read `room`: 0 for their own DMs, their join
+        time for a group they are in. Otherwise sends an ERROR and returns None. Caller holds the lock.
+        """
+        if not isinstance(room, str) or not room.startswith(("dm:", "group:")):
+            self.send_error(sock, BAD_REQUEST, f"{room!r} is not a room id")
+            return None
+        if room.startswith("dm:"):
+            if name not in room.removeprefix("dm:").split("|"):
+                self.send_error(sock, NOT_MEMBER, "you can only read your own private chats")
+                return None
+            return 0.0
+        info = self.find_group(sock, room.removeprefix("group:"))
+        if info is None:
+            return None
+        if name not in info["members"]:
+            self.send_error(sock, NOT_MEMBER, f"join {room.removeprefix('group:')!r} first")
+            return None
+        return info["joined"][name]             # only messages from after they joined
 
     def find_group(self, sock, group):
         """Return the group's info dict, or send NO_SUCH_GROUP and return None. Caller holds the lock."""
@@ -314,6 +399,7 @@ def main():
     server = ChatServer(args.host, args.port)
     port = server.start()
     log.info("listening on %s:%d  (Ctrl+C to stop)", args.host, port)
+    log.info("AI summaries: %s", ai.describe(ai.load_config()))
     # The list may include virtual adapters (WSL, VirtualBox); clients need the Wi-Fi/Ethernet one.
     log.info("this machine's IPv4 addresses: %s", ", ".join(local_ipv4_addresses()) or "unknown")
     try:
