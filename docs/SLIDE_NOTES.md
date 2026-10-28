@@ -79,6 +79,13 @@ in the message that merged PR #2:
 >
 > Then run the unit tests and the e2e check, open a PR, and stop. In your summary, tell me which model IDs you found and how many real API calls you made.
 
+**Prompt P5** (AI features UI shell, PR `feat/ui-ai-strip`). The design itself came from an earlier prompt that produced the "Socket Chat UI Design" mock-ups (login, dialogs, private chat, group chat, AI Assistant, handoff):
+
+> ช่วยแตกอีก branch แล้วทำ UI ตาม artifact ได้เลย
+>
+> (Translation: "Create another branch and build the UI from the artifact." The artifact's decisions: no auto-translate, a
+> Translate link under each message; an Analyze mood button on each message; AI tools strip with Summarize; a separate AI Assistant tab.)
+
 ## R1: System architecture
 Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides are in [`docs/diagrams/`](diagrams/)
 (re-render with `python scripts/render_diagrams.py` after editing the Mermaid blocks).
@@ -229,7 +236,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   so the demo never breaks.
 - **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_summarize` + `summarize_worker` + `visible_since` (L317–368)
 - **Code snapshot 2:** `ai.py` → `summarize` (L90–111: model fallback loop) and `call_gemini` (L124–144: the HTTPS request, key in the `x-goog-api-key` header)
-- **Code snapshot 3:** `client.py` → `RoomTab.summarize` + `add_summary` (L152–167); `server.py` → `MessageBuffer` (L31–47: `deque(maxlen=50)` per room)
+- **Code snapshot 3:** `client.py` → `RoomTab.summarize` + `add_summary` (L350–365); `server.py` → `MessageBuffer` (L31–47: `deque(maxlen=50)` per room)
 - **AI model:** Google **Gemini 3 Flash** (`gemini-3-flash-preview`), falling back to **Gemini 2.5 Flash** (`gemini-2.5-flash`) and
   **Gemini 2.5 Flash-Lite** (`gemini-2.5-flash-lite`). We found these IDs by calling the `models.list` endpoint once with our key.
   - Reference: Gemini models, https://ai.google.dev/gemini-api/docs/models
@@ -240,6 +247,21 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   `tests/test_server.py` → `Special1SummarizeTests` (L318–397) and `Special1KeyLeakTests` (L400–431);
   `scripts/e2e_gui_check.py` clicks **Summarize** (offline mode).
 - **AI prompt:** P4
+## AI features UI shell (translation, sentiment, chatbot: screen only)
+- **How:** Every room tab has a violet **AI tools** bar (a *Translate to* language picker and **Summarize chat**). Under each
+  message from someone else there is a **Translate** link, and every message has an **Analyze mood** button at the right edge
+  of its header. A separate **AI Assistant** tab (opened from the sidebar) holds a private conversation with the chatbot.
+  The tabs only draw things and call functions: `ChatApp.translate_message`, `analyze_mood`, `ask_bot` and `clear_bot` are the
+  plug-in points, and each feature owner replaces the stub with a `send(...)` and an `on_<reply>` handler that calls the tab's result
+  methods (`add_translation`, `set_mood`, `add_reply`, …). Until then the buttons show "… isn't available yet".
+- **Code snapshot (mandatory):** `client.py` → `RoomTab.add_message` + `insert_slot` + `replace_slot` (L251–292). A *slot* is a
+  tagged stretch of text in the `Text` widget that can be swapped as a whole, so a result lands under the right message even when
+  newer messages have arrived.
+- **Code snapshot 2:** `client.py` → `BotTab` (L378–), `ChatApp.translate_message` … `clear_bot` (L767–)
+- **Talking points:** Tkinter is not thread-safe, so results still arrive through the receiver thread → queue → `poll_inbox`;
+  nothing in the UI calls the network except through `ChatApp.send`; the chat windows are always light so tinted AI blocks stay readable.
+- **Proof:** `scripts/e2e_gui_check.py` (checks labelled `AI`): a real click on the Translate link, the stubs, and every result state.
+- **AI prompt:** P5
 ## Special 2: File / image sending
 ## Special 3: Chat history + unread badges
 ## Special 4: Typing indicator + online status
