@@ -47,15 +47,15 @@ explain the concepts and code related to socket programming and to the requireme
 
 At least one feature **must be an AI feature** (speech-to-text, summarization, sentiment analysis, chatbot, …).
 
-Our planned features:
+Our planned features (all four are AI features, one per team member; UI and owners in [`AI_FEATURES.md`](AI_FEATURES.md)):
 
-1. **AI chat summarization:** `Summarize` button / `/summarize` in any room you can see → server asks Gemini to summarize that room's recent history (offline fallback if no API key).
-2. **File / image sending** over the same TCP connection (base64 in the JSON frame, size-limited); PNG/GIF shown inline.
-3. **Chat history + unread badges:** the server keeps per-room history; opening a room loads it; unread counts appear in lists and tabs.
-4. **Typing indicator + online status:** "X is typing…", plus online/offline markers in member lists and join/leave notices.
+1. **Translation (mee):** a *Translate* link under each message; the server asks Gemini to translate that one message into the language chosen in the room's *Translate to* picker. No auto-translate.
+2. **Sentiment analysis (magga):** an *Analyze mood* button on each message; the server classifies that one message as positive, neutral or negative.
+3. **Text summarization (euro):** `Summarize` button in any room you can see → server asks Gemini to summarize that room's recent history (offline fallback if no API key).
+4. **Chatbot (timsum):** an *AI Assistant* tab with its own private conversation; the server answers questions with Gemini (offline fallback message if no API key).
 5. *(Optional)* **Cloud deployment** of the server on a free VM.
 
-Present the 4 strongest; the AI feature must be one of them.
+Present the 4 AI features; cloud deployment is a spare fifth if time allows.
 
 ## Slide template structure (`…Implementation_Explanation….pdf`)
 
