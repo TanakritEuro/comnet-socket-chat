@@ -33,13 +33,20 @@ Set up on the **server machine only**:
 1. Get a free API key at https://aistudio.google.com/apikey.
 2. `cp .env.example .env` (PowerShell: `Copy-Item .env.example .env`) and paste the key after `GEMINI_API_KEY=`.
    `.env` is git-ignored. Never commit it, and never put the key on a client PC.
-3. Start the server. It logs `AI summaries: Gemini models gemini-3-flash-preview -> gemini-2.5-flash -> gemini-2.5-flash-lite`
+3. Start the server. It logs `AI summaries: Gemini models gemini-3.1-flash-lite -> gemini-3.5-flash-lite -> gemini-3.5-flash`
    (or `offline summaries only` when no key is set). The key itself is never printed.
 
 **Free-tier limits:** each model allows only about **5–10 requests per minute and 20 requests per day**. When a model answers
 HTTP 429 (rate limit), 404 or 503, the server tries the next model in `GEMINI_FALLBACK_MODELS`. If all fail, you get the offline
 summary. Each click is one request, so don't click Summarize for fun before the demo. The tests and `scripts/e2e_gui_check.py`
 never call the real API.
+
+## AI Assistant (chatbot)
+
+Double-click **AI Assistant** in the sidebar to open a private chat with the bot. Ask anything about the app or networking, click a
+suggestion chip, or use **Explain my last chat** to let the bot read the chat tab you had open before (the server first checks
+that you may read that room). It remembers your last 10 questions, **Clear conversation** makes it forget, and only you see the
+conversation. It uses the same `.env` key and model list as the summaries. Without a key it answers with a notice saying so.
 
 ## How to demo on 2+ computers
 
@@ -112,6 +119,10 @@ python client.py --host 192.168.1.20 --name alice     # or just: python client.p
 | "actively refused" / "connection refused" | Server not running, or a different port |
 | Works on the server PC itself (`localhost`) but not from another PC | Firewall, or you used a virtual adapter's IP |
 | `ModuleNotFoundError: No module named 'tkinter'` | Python was installed without Tcl/Tk. Reinstall from python.org with "tcl/tk and IDLE" ticked |
+| AI features fail, server log says `Gemini ... failed: URLError` (macOS) | Python from python.org has no root certificates yet. Run `open "/Applications/Python 3.12/Install Certificates.command"` (use your version), then restart the server |
+| Server log says `Gemini <model> answered HTTP 404` | Google retired that model for new keys. List the models your key can use (`GET https://generativelanguage.googleapis.com/v1beta/models`, key in the `x-goog-api-key` header) and set `GEMINI_MODEL` / `GEMINI_FALLBACK_MODELS` in `.env` |
+| `HTTP 503` or `TimeoutError` in the log | The model is overloaded (preview models often are). Try a non-preview model such as a `-flash-lite` one |
+| The assistant says "couldn't answer right now" | The server could not get an answer from Gemini. The reason is in the server log (see the rows above) |
 
 ## Team workflow
 

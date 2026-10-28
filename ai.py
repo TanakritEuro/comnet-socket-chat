@@ -27,8 +27,8 @@ log = logging.getLogger("ai")
 
 ENV_FILE = Path(__file__).resolve().parent / ".env"
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-DEFAULT_MODEL = "gemini-3-flash-preview"
-DEFAULT_FALLBACKS = "gemini-2.5-flash,gemini-2.5-flash-lite"
+DEFAULT_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_FALLBACKS = "gemini-3.5-flash-lite,gemini-3.5-flash"
 TIMEOUT = 15                        # seconds to wait for Google before giving up
 TRY_NEXT_MODEL = {404, 429, 503}    # model not found / rate-limited / overloaded: another model may work
 OFFLINE = "offline"                 # the "model" name we report for the offline summary

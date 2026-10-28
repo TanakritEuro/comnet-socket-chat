@@ -247,7 +247,7 @@ Used by Special 1, AI chat summarization (`ai.py`).
     `https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent`. The API key goes in the
     `x-goog-api-key` **header** (never in the URL), and the transcript goes in a JSON body
     (`{"systemInstruction": …, "contents": [{"parts": [{"text": …}]}]}`). The timeout is 15 s.
-  - Models: `gemini-3-flash-preview` first, then `gemini-2.5-flash`, then `gemini-2.5-flash-lite` (from `GEMINI_MODEL` /
+  - Models: `gemini-3.1-flash-lite` first, then `gemini-3.5-flash-lite`, then `gemini-3.5-flash` (from `GEMINI_MODEL` /
     `GEMINI_FALLBACK_MODELS`). HTTP 429 (rate limit), 404 (no such model) or 503 (overloaded) → try the next one.
   - The reply text is in `candidates[0].content.parts[].text`. It goes back to the requester only, as `SUMMARY {room, text, model}`.
     If there's no key, no messages, or no model works, the server sends an offline summary (`model: "offline"`), so the demo

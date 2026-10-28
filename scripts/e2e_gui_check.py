@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # so "import c
 import tkinter as tk
 
 import ai
+import ai_bot
 import client
 from protocol import HELLO, MSG, SUMMARY, recv_msg, send_msg
 from server import ChatServer
@@ -89,6 +90,11 @@ def offline_summarizer(room, messages):
     return ai.summarize(room, messages, ai.Config(api_key="", models=[]))
 
 
+def offline_bot(history, text, room, messages):
+    """Same for the chatbot: the no-API-key answer, so the real server path runs without the real API."""
+    return ai_bot.ask(history, text, room, messages, ai.Config(api_key="", models=[]))
+
+
 def screenshot(windows, path):
     """Save a PNG covering the given windows (Windows only: PowerShell + .NET do the capture)."""
     left = min(w.winfo_rootx() for w in windows) - 10
@@ -117,7 +123,8 @@ def main():
         ctypes.windll.shcore.SetProcessDpiAwareness(1)    # same as client.main(), so sizes match a real run
     record_popups()
 
-    server = ChatServer("127.0.0.1", 0, summarizer=offline_summarizer)   # port 0: the OS picks a free port
+    # port 0: the OS picks a free port
+    server = ChatServer("127.0.0.1", 0, summarizer=offline_summarizer, bot=offline_bot)
     port = server.start()
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
@@ -216,8 +223,11 @@ def main():
     check("AI  AI Assistant tab opens", alice.bot_tab is bot and alice.notebook.select() == str(bot))
     bot.entry.insert(0, "what is TCP?")
     bot.ask()
-    check("AI  asking without a feature keeps the question and shows a notice",
-          bot.entry.get() == "what is TCP?" and "The assistant isn't available yet." in text_of(bot))
+    check("AI  asking sends the question and shows 'Thinking…'",
+          bot.entry.get() == "" and "what is TCP?" in text_of(bot) and "Thinking…" in text_of(bot))
+    check("AI  the server answers (offline, no API key) and Ask is enabled again",
+          wait_until(root, lambda: "Offline reply · no AI was used" in text_of(bot)) and
+          "Thinking…" not in text_of(bot) and "GEMINI_API_KEY" in text_of(bot) and bot.ask_button.instate(["!disabled"]))
     bot.entry.delete(0, "end")
     bot.add_question("what is TCP?")
     bot.show_thinking()
