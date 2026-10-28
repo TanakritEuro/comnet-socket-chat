@@ -22,7 +22,7 @@ from tkinter import font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 
 from protocol import (
     BYE, DM, ERROR, GROUP_CREATE, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO,
-    MAX_NAME_LEN, MSG, NAME_TAKEN, USERS, WELCOME,
+    MAX_NAME_LEN, MSG, NAME_TAKEN, SUMMARIZE, SUMMARY, USERS, WELCOME,
     ProtocolError, clean_name, dm_partner, dm_room, group_room, recv_msg, send_msg,
 )
 
@@ -104,11 +104,13 @@ class LoginFrame(ttk.Frame):
 
 
 class RoomTab(ttk.Frame):
-    """One chat room (R5): a read-only chat window plus a chat box and Send button (R6)."""
+    """One chat room (R5): a read-only chat window plus a chat box and Send button (R6),
+    and a Summarize button that asks the server for an AI summary (special 1)."""
 
-    def __init__(self, parent, on_send):
+    def __init__(self, parent, on_send, on_summarize):
         super().__init__(parent, padding=6)
         self.on_send = on_send              # function(text) -> True if the message was sent
+        self.on_summarize = on_summarize    # function() -> True if SUMMARIZE was sent
 
         # Chat box: Enter or the Send button sends. Packed first (at the bottom) so it
         # never gets squeezed out when the window is small.
@@ -118,6 +120,8 @@ class RoomTab(ttk.Frame):
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Return>", lambda event: self.send())
         ttk.Button(bar, text="Send", command=self.send).pack(side="left", padx=(6, 0))
+        self.summarize_button = ttk.Button(bar, text="Summarize", command=self.summarize)
+        self.summarize_button.pack(side="left", padx=(6, 0))
 
         # Chat window. state="disabled" makes it read-only; we unlock it briefly to append.
         self.window = scrolledtext.ScrolledText(self, state="disabled", wrap="word", width=60, height=20,
@@ -126,6 +130,12 @@ class RoomTab(ttk.Frame):
         self.window.tag_configure("me", foreground="#1a5fb4", font=("Segoe UI", 10, "bold"))
         self.window.tag_configure("other", foreground="#26a269", font=("Segoe UI", 10, "bold"))
         self.window.tag_configure("notice", foreground="gray", font=("Segoe UI", 10, "italic"))
+        # AI summaries get a tinted, indented block so nobody mistakes them for a chat message.
+        self.window.tag_configure("summary_title", foreground="#613583", background="#f3eefa",
+                                  font=("Segoe UI", 10, "bold"), lmargin1=8, lmargin2=8, spacing1=6)
+        self.window.tag_configure("summary", background="#f3eefa", lmargin1=8, lmargin2=8)
+        self.window.tag_configure("summary_model", foreground="gray", background="#f3eefa",
+                                  font=("Segoe UI", 9, "italic"), lmargin1=8, lmargin2=8, spacing3=6)
 
     def send(self):
         """Hand the typed text to on_send. It appears in the window when the server echoes it back."""
@@ -138,6 +148,26 @@ class RoomTab(ttk.Frame):
         stamp = time.strftime("%H:%M", time.localtime(ts))
         self.append(f"[{stamp}] {sender}: ", "me" if mine else "other")
         self.append(text + "\n")
+
+    def summarize(self):
+        """Ask for a summary. The button stays disabled until the answer (or an error) arrives,
+        so a double-click can't use up the tiny API quota."""
+        if self.on_summarize():
+            self.summarize_button.state(["disabled"])
+            self.add_notice("Asking the server for a summary…")
+
+    def add_summary(self, text, model):
+        """Show a SUMMARY as a marked system block, with the model name underneath."""
+        self.append("Summary of this room\n", "summary_title")
+        self.append(text.strip() + "\n", "summary")
+        if model == "offline":
+            self.append("Offline summary · no AI was used\n", "summary_model")
+        else:
+            self.append(f"AI summary · {model}\n", "summary_model")
+        self.enable_summarize()
+
+    def enable_summarize(self):
+        self.summarize_button.state(["!disabled"])
 
     def add_notice(self, text):
         """Append a grey status line, e.g. "You joined #netlab"."""
@@ -162,7 +192,8 @@ class ChatApp:
         self.rooms = {}                     # room id -> RoomTab
         self.users = []                     # online names, in the order shown in the user list
         self.groups = {}                    # group name -> {"creator": ..., "members": [...]}
-        self.handlers = {USERS: self.on_users, GROUPS: self.on_groups, MSG: self.on_msg, ERROR: self.on_error}
+        self.handlers = {USERS: self.on_users, GROUPS: self.on_groups, MSG: self.on_msg,
+                         SUMMARY: self.on_summary, ERROR: self.on_error}
 
         self.build_widgets()
         root.title(f"Socket Chat: {name}")
@@ -308,8 +339,16 @@ class ChatApp:
             return
         tab.add_message(msg["from"], msg["text"], msg["ts"], mine=msg["from"] == self.me)
 
+    def on_summary(self, msg):
+        """Special 1: the server's summary, sent only to us. Shown in that room's tab."""
+        tab = self.rooms.get(msg["room"])
+        if tab is not None:                 # the tab may have closed (e.g. we left the group)
+            tab.add_summary(msg["text"], msg["model"])
+
     def on_error(self, msg):
         """The server refused a request (e.g. GROUP_EXISTS, NO_SUCH_USER)."""
+        for tab in self.rooms.values():     # if it was a SUMMARIZE that failed, allow a retry
+            tab.enable_summarize()
         messagebox.showwarning(msg.get("code", "Error"), msg.get("message", ""), parent=self.root)
 
     def on_disconnected(self):
@@ -327,7 +366,7 @@ class ChatApp:
     def open_room(self, room, title, on_send, select=True):
         """Return the tab for this room id, creating it first if needed (R5: one tab per room)."""
         if room not in self.rooms:
-            self.rooms[room] = RoomTab(self.notebook, on_send)
+            self.rooms[room] = RoomTab(self.notebook, on_send, lambda: self.send(SUMMARIZE, room=room))
             self.notebook.add(self.rooms[room], text=title)
         if select:
             self.notebook.select(self.rooms[room])
