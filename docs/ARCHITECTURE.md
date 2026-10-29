@@ -37,6 +37,45 @@ flowchart LR
 - The server listens on `0.0.0.0:5050`, which means "port 5050 on every network interface of this PC".
 - Only the **server** talks to Gemini, so the API key never leaves the server machine.
 
+### Cloud variant: Google Cloud VM
+
+The same programs, with the server on a free **e2-micro VM** in Google Cloud (us-west1, Oregon) instead of on a lab PC
+(optional special point; setup in [`deploy/README.md`](../deploy/README.md)). The laptops can then be on **any** network.
+
+<!-- diagram: deployment-cloud -->
+```mermaid
+flowchart LR
+    subgraph NETS["Laptops on any network: home Wi-Fi, phone hotspot, campus"]
+        direction TB
+        A["Laptop 1<br/>python client.py<br/>Tkinter GUI"]
+        B["Laptop 2<br/>python client.py<br/>Tkinter GUI"]
+    end
+    I(("Internet"))
+    subgraph GCP["Google Cloud · us-west1 (Oregon)"]
+        direction TB
+        FW["VPC firewall rule<br/>allow-chat-5050<br/>ingress TCP 5050<br/>tag chat-server"]
+        VM["e2-micro VM chat-server<br/>Ubuntu 24.04<br/>systemd service<br/>chat-server.service<br/>python3 server.py<br/>--port 5050"]
+        FW --> VM
+    end
+    G["Google Gemini API<br/>generativelanguage.googleapis.com"]
+    A <-->|"TCP to the VM's<br/>external IP, port 5050<br/>length-prefixed<br/>JSON frames"| I
+    B <-->|"TCP to the VM's<br/>external IP, port 5050<br/>length-prefixed<br/>JSON frames"| I
+    I <--> FW
+    VM -->|"① HTTPS request<br/>TLS over TCP :443<br/>chat text to summarize"| G
+    G -->|"② HTTPS response<br/>summary text"| VM
+```
+
+- **Why it works from any network:** each laptop *opens* an outgoing TCP connection to the VM, which home routers, NAT
+  and campus networks normally allow. Only the VM needs an open **inbound** port, and the firewall rule opens exactly
+  one: TCP 5050, for VMs tagged `chat-server`.
+- **Why a VM:** our protocol is raw TCP. The server is a long-running process that holds one open connection per client
+  and listens on its own port. Static hosting only serves files, and serverless platforms only run code per HTTP request
+  on their own HTTPS port, so neither can accept a raw TCP connection that stays open.
+- `systemd` keeps `server.py` running after SSH is closed, restarts it if it crashes, and starts it when the VM boots.
+- The Gemini call is the same HTTPS request as on a lab PC; it now goes from Google's network, and the key sits in `.env` on
+  the VM only.
+- Everything else (protocol, threads, privacy rules) is unchanged: the VM runs the same `server.py`.
+
 ## 2. Inside each program: threads
 
 **Server (`server.py`):**

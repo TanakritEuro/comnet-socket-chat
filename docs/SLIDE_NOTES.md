@@ -141,6 +141,17 @@ certificate problem and that Google had retired the 2.5 models for new keys.
 >
 > Run the unit tests and the e2e check, rebase on main if teammates merged anything meanwhile, open the PR, and stop. Tell me how to test it by hand. No real API calls are needed for this feature.
 
+**Prompt P9** (cloud deployment docs, PR `docs/cloud-deploy`):
+
+> Pull main and create the branch docs/cloud-deploy.
+>
+> 1. Copy ../GCP_DEPLOY_GUIDE.md (one folder above the repo) into the repo as deploy/README.md. Keep the content, but fix anything that no longer matches the code: commands, the port, the .env variable name, the test command. Make sure it contains no IPs, API keys or .env contents.
+> 2. Add deploy/chat-server.service: the same systemd unit as in Part F of the guide, with User and WorkingDirectory as clear placeholders, and a comment at the top explaining how to install it.
+> 3. Link deploy/README.md from the main README's demo section ("Running the server on Google Cloud").
+> 4. Add a cloud variant of the deployment diagram to docs/ARCHITECTURE.md (laptops on any network → Internet → GCP e2-micro VM in us-west1, port 5050 → Gemini API over HTTPS). Render the PNG into docs/diagrams/ with scripts/render_diagrams.py at 2x.
+> 5. Add the cloud special point to docs/SLIDE_NOTES.md: what it is, why a VM (raw TCP needs a long-running process and an open port, which static or serverless hosts can't provide), the firewall rule, systemd, and the update steps. Quote this prompt.
+> Docs only, no code changes. Run the unit tests anyway, then open a PR and stop.
+
 ## R1: System architecture
 Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides are in [`docs/diagrams/`](diagrams/)
 (re-render with `python scripts/render_diagrams.py` after editing the Mermaid blocks).
@@ -159,6 +170,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
       rejected (R11).
     - `diagrams/sequence-groups.png`: create (only the creator is a member, R8) → `GROUPS` to everyone (R9) → bob joins
       himself (R10) → bob's group message reaches alice and bob only (R11).
+    - `diagrams/deployment-cloud.png`: the same system with the server on a Google Cloud VM (see the cloud special point).
 - **Slide "R1: Protocols" (what / why / how):** one line each. Details are in ARCHITECTURE.md §4.
   - **TCP:** reliable, ordered byte stream. *Why:* chat messages must not be lost or reordered, and an open connection
     means "online" (FIN/RST → user list update). *How:* `socket(AF_INET, SOCK_STREAM)`, `bind/listen/accept` on the server, `create_connection` on the client.
@@ -372,3 +384,26 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 - **AI prompt:** P8
 ## Special 4: Typing indicator + online status
 ## (Optional) Cloud deployment
+- **What:** the same `server.py` runs on a free **Google Cloud e2-micro VM** (Ubuntu 24.04, region us-west1 Oregon) instead of
+  a lab PC. Every laptop runs `client.py` and connects to the VM's external IP on TCP port 5050 from any network (home Wi-Fi,
+  phone hotspot). The step-by-step setup is [`deploy/README.md`](../deploy/README.md).
+- **Diagram:** `diagrams/deployment-cloud.png` (laptops on any network → Internet → firewall rule → VM → Gemini over HTTPS).
+- **Why a VM, not static or serverless hosting:** our protocol is raw TCP, so the server is a **long-running process** that keeps
+  one open connection per client and listens on **its own port** (5050). Static hosting only serves files. Serverless platforms
+  run code per HTTP request, only on their managed HTTPS port, and stop the process between requests, so neither can accept a
+  raw TCP connection that stays open. A VM is a normal Linux machine: we choose the process and the port.
+- **Why it works from any network:** the laptops only make *outgoing* connections, which NAT and campus networks allow. Only the
+  VM needs an inbound port open.
+- **Firewall rule:** VPC firewall rule `allow-chat-5050`: ingress, allow, TCP **5050** only, source `0.0.0.0/0`, applied only to
+  VMs with the network tag `chat-server`. Nothing else is opened (the HTTP/HTTPS boxes stay unticked).
+- **systemd:** [`deploy/chat-server.service`](../deploy/chat-server.service) runs `/usr/bin/python3 server.py --host 0.0.0.0
+  --port 5050` in the clone as a normal user, with `Restart=on-failure`, enabled at boot (`WantedBy=multi-user.target`). The server
+  keeps running after SSH is closed, restarts if it crashes, and comes back after a reboot. Logs: `journalctl -u chat-server -f`.
+- **Update steps** (after a PR merges): SSH into the VM →
+  `cd ~/comnet-socket-chat && git pull && python3 -m unittest discover -s tests && sudo systemctl restart chat-server`.
+  A restart logs everyone out and clears history and groups (they live in memory), so never update during the demo.
+- **Secrets:** the Gemini key is only in `.env` on the VM (`chmod 600`), never in the repo. The external IP is shared only in
+  the group chat. Delete the VM and shut down the project after 9 Nov.
+- **Code snapshot:** `deploy/chat-server.service` (the whole unit is about 15 lines without comments) and the firewall-rule
+  table in `deploy/README.md`, Part C.
+- **AI prompt:** P9
