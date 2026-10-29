@@ -33,13 +33,32 @@ Set up on the **server machine only**:
 1. Get a free API key at https://aistudio.google.com/apikey.
 2. `cp .env.example .env` (PowerShell: `Copy-Item .env.example .env`) and paste the key after `GEMINI_API_KEY=`.
    `.env` is git-ignored. Never commit it, and never put the key on a client PC.
-3. Start the server. It logs `AI summaries: Gemini models gemini-3.1-flash-lite -> gemini-3.5-flash-lite -> gemini-3.5-flash`
+3. Start the server. It logs `AI summaries: Gemini models gemini-3.5-flash-lite -> gemini-3.1-flash-lite -> gemini-3.8-flash -> gemini-3-flash-preview -> gemini-2.5-flash-lite -> gemini-2.5-flash`
    (or `offline summaries only` when no key is set). The key itself is never printed.
+   Without `GEMINI_MODEL` / `GEMINI_FALLBACK_MODELS` in `.env`, the server uses the team chain below.
 
-**Free-tier limits:** each model allows only about **5–10 requests per minute and 20 requests per day**. When a model answers
-HTTP 429 (rate limit), 404 or 503, the server tries the next model in `GEMINI_FALLBACK_MODELS`. If all fail, you get the offline
-summary. Each click is one request, so don't click Summarize for fun before the demo. The tests and `scripts/e2e_gui_check.py`
-never call the real API.
+**Model chain and free-tier limits.** Every AI request (Summarize, an AI Assistant question, and later Translate and Analyze
+mood) tries these models in order. HTTP 429 (rate limit), 404 or 503 moves to the next one; if all fail you get the offline
+answer. Limits are **per Google Cloud project** (not per key or per teammate), and daily quotas reset at **midnight Pacific
+time** (3 pm in Thailand). Check your own numbers on the [AI Studio rate-limit page](https://aistudio.google.com/rate-limit).
+
+| Order | Model ID | Free-tier requests/min | Notes |
+|---|---|---|---|
+| 1 | `gemini-3.5-flash-lite` | 15 | fast; good enough for summary, translate, mood and chatbot |
+| 2 | `gemini-3.1-flash-lite` | 15 | about 1 s per answer in our tests |
+| 3 | `gemini-3.8-flash` | 5 | stronger, slower |
+| 4 | `gemini-3-flash-preview` | 5 | preview; has been overloaded (503) at times |
+| 5 | `gemini-2.5-flash-lite` | 10 | only for keys that used 2.5 before; others get a quick 404 and skip it |
+| 6 | `gemini-2.5-flash` | 5 | same as above |
+
+Not in the chain: `gemma-4-31b-it` / `gemma-4-26b-a4b-it` (30 requests/min, but `gemma-4-31b-it` didn't answer within 60 s in our
+test), `gemini-3.5-flash` (not in the free tier), and `gemini-3.6-flash` (could be added later).
+
+**How many AI clicks per day?** Each click is one request to the first model that still has quota (rate-limited 429 answers are
+not counted as successful requests). So a day's total is roughly the **sum of the daily limits (RPD) of the six models**: for example
+6 × 20 = about 120 clicks if each allowed 20 a day. Bursts are limited by requests/min: about 15 a minute on the first model, about
+55 a minute across the whole chain. No AI feature calls the API by itself: only a click (or a sent AI Assistant question) does.
+The tests and `scripts/e2e_gui_check.py` never call the real API.
 
 ## AI Assistant (chatbot)
 

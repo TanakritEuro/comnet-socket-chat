@@ -103,6 +103,21 @@ conversation history; (3) the server handlers; (4) the client plug-in points; (5
 When the first real test failed, we asked it to explain the server log (`URLError`, then `404` / `503`), and it found the macOS
 certificate problem and that Google had retired the 2.5 models for new keys.
 
+**Prompt P7** (team-wide model chain, PR `fix/ai-model-chain`):
+
+> From my AI Studio Rate Limit page (free tier), the text models I can use are:
+> Gemma 4 31B and Gemma 4 26B: 30 RPM; Gemini 3.5 Flash Lite and 3.1 Flash Lite: 15 RPM; Gemini 2.5 Flash Lite: 10 RPM; Gemini 3.8 Flash, 3.6 Flash, 3 Flash and 2.5 Flash: 5 RPM.
+> Requests per day: [model: RPD, ...]
+> "Gemini 3.5 Flash" (non-Lite) is NOT in my list, so gemini-3.5-flash in the current defaults is probably wrong.
+>
+> 1. Get the exact IDs for these from models.list (one call, never print the key). Use the API key from .env.
+> 2. Build one team-wide chain on a branch + PR: put the models with the biggest daily allowance first, as long as their answers are good enough for summary, translate, mood and chatbot. Suggested order, adjust to the RPD numbers: gemini-3.5-flash-lite → gemini-3.1-flash-lite → gemma-4-31b → gemini-3.8-flash → gemini-3-flash-preview. Drop gemini-3.5-flash. Drop the 2.5 models if models.list or the docs say they're retired.
+>    Gemma models on the Gemini API may not accept systemInstruction or the same generation settings as Gemini, so check the docs. If needed, fold the instructions into the user message for Gemma only, and add a mocked unit test for that path.
+> 3. Update ai.py defaults, .env.example, CLAUDE.md and the README limits table. Remove the GEMINI_MODEL / GEMINI_FALLBACK_MODELS lines from my .env so I use the team defaults (don't touch the key line).
+> 4. Check whether any AI feature calls the API automatically (e.g. per incoming message) rather than only on a click, and tell me roughly how many AI clicks per day the whole chain allows.
+> 5. Run the unit tests and scripts/e2e_gui_check.py (update it for the new AI tools strip if needed), then open the PR and stop.
+> Apart from the one models.list call, make at most 2 real generateContent calls, one to check that a Gemma model answers correctly.
+
 ## R1: System architecture
 Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides are in [`docs/diagrams/`](diagrams/)
 (re-render with `python scripts/render_diagrams.py` after editing the Mermaid blocks).
@@ -254,11 +269,14 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 - **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_summarize` + `summarize_worker` + `visible_since` (L317–368)
 - **Code snapshot 2:** `ai.py` → `summarize` (L90–111: model fallback loop) and `call_gemini` (L124–144: the HTTPS request, key in the `x-goog-api-key` header)
 - **Code snapshot 3:** `client.py` → `RoomTab.summarize` + `add_summary` (L350–365); `server.py` → `MessageBuffer` (L31–47: `deque(maxlen=50)` per room)
-- **AI model:** Google **Gemini 3.1 Flash-Lite** (`gemini-3.1-flash-lite`), falling back to **Gemini 3.5 Flash-Lite** (`gemini-3.5-flash-lite`)
-  and **Gemini 3.5 Flash** (`gemini-3.5-flash`). We found these IDs by calling the `models.list` endpoint with our key. We first used
-  `gemini-3-flash-preview` with the 2.5 models as fallbacks, but the preview model was often overloaded (HTTP 503 / timeouts) and Google
-  answered 404 "no longer available to new users" for the 2.5 models. Only `gemini-3.1-flash-lite` has been tried with real requests (about 1 s per answer);
-  the two fallbacks are listed for our key but untested.
+- **AI model:** a chain of Google Gemini models, tried in order until one answers: **Gemini 3.5 Flash-Lite**
+  (`gemini-3.5-flash-lite`) → **Gemini 3.1 Flash-Lite** (`gemini-3.1-flash-lite`) → **Gemini 3.8 Flash** (`gemini-3.8-flash`) →
+  **Gemini 3 Flash** (`gemini-3-flash-preview`) → **Gemini 2.5 Flash-Lite** → **Gemini 2.5 Flash**. We found the IDs by calling
+  the `models.list` endpoint with our key, and ordered them by free-tier rate limit: Flash-Lite allows 15 requests/min, Flash 5.
+  - History: we started with `gemini-3-flash-preview`, which was sometimes overloaded (HTTP 503 / timeouts). The 2.5 models answer
+    404 "no longer available to new users" for keys that never used them, so they're last resorts. We also tried **Gemma 4**
+    (`gemma-4-31b-it`, 30 requests/min), but it didn't answer within 60 s on the free tier, so it's not in the chain.
+  - Real requests so far: `gemini-3-flash-preview` (3.7 s) and `gemini-3.1-flash-lite` (about 1 s).
   - Reference: Gemini models, https://ai.google.dev/gemini-api/docs/models
   - API used: `generateContent` REST reference, https://ai.google.dev/api/generate-content
 - **Talking points:** the key never leaves the server; the AI call runs outside the lock, so chat keeps flowing while Gemini
@@ -266,7 +284,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 - **Proof:** `tests/test_ai.py` (mocked HTTP: request format, 429/404/503 fallback, offline cases, key never logged);
   `tests/test_server.py` → `Special1SummarizeTests` (L318–397) and `Special1KeyLeakTests` (L400–431);
   `scripts/e2e_gui_check.py` clicks **Summarize** (offline mode).
-- **AI prompt:** P4
+- **AI prompt:** P4 (the feature), P7 (the model chain)
 ## AI features UI shell (translation, sentiment, chatbot: screen only)
 - **How:** Every room tab has a violet **AI tools** bar (a *Translate to* language picker and **Summarize chat**). Under each
   message from someone else there is a **Translate** link, and every message has an **Analyze mood** button at the right edge
