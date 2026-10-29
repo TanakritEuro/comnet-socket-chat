@@ -177,7 +177,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   length prefix in front of it. `recv_exact` loops on `recv()` until it has exactly that many bytes, because a single `recv()` can return half a
   message, or two messages at once.
 - **Code snapshot (mandatory):** `protocol.py` → `send_msg` (L76–84), `recv_exact` (L87–101), `recv_msg` (L104–125)
-- **Code snapshot 2:** `server.py` → `ChatServer.start` (L106–122: socket/bind/listen) and `serve_forever` (L124–134: `accept()` + one thread per client)
+- **Code snapshot 2:** `server.py` → `ChatServer.start` (L116–132: socket/bind/listen) and `serve_forever` (L134–144: `accept()` + one thread per client)
 - **Proof:** `tests/test_protocol.py` → `test_frame_arriving_in_small_pieces`, `test_two_frames_in_one_send`
 - **AI prompt:** P1
 
@@ -185,7 +185,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 - **How:** The first message must be `HELLO {name}`. Under the lock, the server checks the name against the dict of
   online clients. If the name is taken it replies `ERROR NAME_TAKEN`, and the client can try again on the same connection. A name is
   released when its client disconnects.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.login` (L215–241)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.login` (L225–251)
 - **Code snapshot 2:** `protocol.py` → `clean_name` (L132–143: 1–20 chars, no `|`)
 - **Proof:** `tests/test_server.py` → `R3UniqueNameTests` (L135–166)
 - **AI prompt:** P1
@@ -194,8 +194,8 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 - **How:** Whenever someone logs in or disconnects, the server sends every client the same
   `USERS` message: the sorted list of **all** online names. Because the list is the same for everyone, each client also sees itself.
   A crash (TCP RST → `ConnectionResetError`) is handled like a normal close.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.broadcast_users` (L190–195)
-- **Code snapshot 2:** `server.py` → `ChatServer.handle_client` (L142–171: the `finally:` block calls `remove_client`) and `remove_client` (L243–252)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.broadcast_users` (L200–205)
+- **Code snapshot 2:** `server.py` → `ChatServer.handle_client` (L152–181: the `finally:` block calls `remove_client`) and `remove_client` (L253–262)
 - **Proof:** `tests/test_server.py` → `R4UserListTests` (L169–188)
 - **AI prompt:** P1
 
@@ -228,7 +228,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 - **Server side:** For `DM {to, text}`, the server builds one `MSG` with room id `dm:<a>|<b>` (names sorted) and
   writes it to exactly two sockets, the sender's and the recipient's. It never touches any other socket, so privacy does not depend on the
   client behaving.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_dm` (L259–274)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_dm` (L269–285)
 - **Code snapshot 2:** `protocol.py` → `dm_room` (L146–149)
 - **Proof:** `tests/test_server.py` → `test_dm_reaches_only_sender_and_recipient` (a third client, carol, receives nothing)
 - **AI prompt:** P1
@@ -239,7 +239,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 ## R8: Create group (creator is only member)
 - **Server side:** `GROUP_CREATE` stores `{"creator": name, "members": [name]}`, so the only member is the creator. The server then
   broadcasts the new `GROUPS` list to everyone. Duplicate names get `GROUP_EXISTS`.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_group_create` (L276–287)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_group_create` (L287–298)
 - **Proof:** `tests/test_server.py` → `R8CreateGroupTests` (L217–236)
 - **AI prompt:** P1
 - **Client side:** **Create…** asks for a name and sends `GROUP_CREATE`. The `#group` tab opens when the server's `GROUPS`
@@ -248,7 +248,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 ## R9: List all groups with members
 - **Server side:** `groups_message` builds the list of every group with its creator and members. It is broadcast after
   each create, join or leave, and also sent to each new client right after login, so late joiners see the existing groups.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.groups_message` + `broadcast_groups` (L197–209)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.groups_message` + `broadcast_groups` (L207–219)
 - **Proof:** `tests/test_server.py` → `R9GroupListTests` (L239–257)
 - **AI prompt:** P1
 - **Client side:** A `ttk.Treeview` shows each group as a parent row (`netlab · 2 members · ✓ joined`, with `(2)` after the name when there are unread messages) with its members
@@ -258,8 +258,8 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 ## R10: Join group by yourself
 - **Server side:** `GROUP_JOIN` has only a `group` field. The server appends the name tied to **this connection**,
   so no message can add someone else. A test sends extra `name`/`user` fields naming carol, and only the sender is added.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_group_join` (L289–302)
-- **Code snapshot 2:** `server.py` → `handle_group_leave` (L304–316)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_group_join` (L300–313)
+- **Code snapshot 2:** `server.py` → `handle_group_leave` (L315–327)
 - **Proof:** `tests/test_server.py` → `test_join_adds_only_the_sender`
 - **AI prompt:** P1
 - **Client side:** Select a group, then **Join** (or double-click it and confirm). The `GROUP_JOIN` message has only a `group`
@@ -269,7 +269,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 ## R11: Group message (members only)
 - **Server side:** For `GROUP_MSG`, the server first checks that the sender is in the member list. If not, it replies `ERROR NOT_MEMBER`
   and delivers nothing. Otherwise it writes the `MSG` (room `group:<name>`) only to the members' sockets.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_group_msg` (L318–335)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_group_msg` (L329–347)
 - **Proof:** `tests/test_server.py` → `R11GroupMessageTests` (L292–324): non-members get nothing, a non-member's message is rejected and
   reaches nobody, and a member who left stops receiving
 - **AI prompt:** P1
@@ -280,7 +280,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 ## Q&A prep: concurrency
 - One thread per client (`serve_forever` → `threading.Thread(target=handle_client)`), and one `threading.Lock` guards
   `clients` and `groups`. Sends also happen under the lock, so two threads never interleave bytes on one socket, and every
-  client sees updates in the same order. See the `ChatServer` class docstring (L63–72).
+  client sees updates in the same order. See the `ChatServer` class docstring (L73–82).
 
 ## Special 1: AI chat summarization
 - **How:** Each room tab has a **Summarize** button that sends `SUMMARIZE {room}`. The server checks that the requester may
@@ -289,9 +289,9 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   and sends `SUMMARY {room, text, model}` back to **the requester only**. If a model is rate-limited (429), missing (404) or
   overloaded (503), the next model is tried. With no key, no messages, or no working model, an offline summary is sent instead,
   so the demo never breaks.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_summarize` + `summarize_worker` + `visible_since` (L358–468)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_summarize` + `summarize_worker` + `visible_since` (L370–480)
 - **Code snapshot 2:** `ai.py` → `summarize` (L96–117: model fallback loop) and `call_gemini` (L130–150: the HTTPS request, key in the `x-goog-api-key` header)
-- **Code snapshot 3:** `client.py` → `RoomTab.summarize` + `add_summary` (L400–415); `server.py` → `MessageBuffer` (L36–59: `deque(maxlen=200)` per room since special 3; the AI reads the newest 50)
+- **Code snapshot 3:** `client.py` → `RoomTab.summarize` + `add_summary` (L400–415); `server.py` → `MessageBuffer` (L36–69: `deque(maxlen=200)` per room since special 3; the AI reads the newest 50)
 - **AI model:** a chain of Google Gemini models, tried in order until one answers: **Gemini 3.5 Flash-Lite**
   (`gemini-3.5-flash-lite`) → **Gemini 3.1 Flash-Lite** (`gemini-3.1-flash-lite`) → **Gemini 3.8 Flash** (`gemini-3.8-flash`) →
   **Gemini 3 Flash** (`gemini-3-flash-preview`) → **Gemini 2.5 Flash-Lite** → **Gemini 2.5 Flash**. We found the IDs by calling
@@ -332,7 +332,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   only**. The chatbot is **not a room**: nothing is written to the message buffer, and `BOT_CLEAR` or a disconnect makes the server forget the
   conversation. If Gemini fails the client gets `ERROR AI_FAILED` with `request: "BOT_ASK"`, so the tab shows a red block instead of a
   pop-up. With no API key the bot answers with a notice and `model: "offline"` (not remembered as conversation).
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_bot_ask` + `bot_worker` + `handle_bot_clear` (L389–445)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_bot_ask` + `bot_worker` + `handle_bot_clear` (L401–457)
 - **Code snapshot 2:** `ai_bot.py` → `ask` (L45–71: model fallback loop), `build_contents` (L74–84: the conversation as alternating
   `user` / `model` turns), `call_gemini_chat` (L87–104: the HTTPS request)
 - **Code snapshot 3:** `client.py` → `ChatApp.ask_bot` + `clear_bot` (L931–943), `on_bot_reply` (L738), `on_error` (L743: the
@@ -359,13 +359,14 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   a live message arrives while the history is loading. Unread counts are kept by the client: other people's messages in a room
   whose tab isn't on screen add to "bob (3)" in the user list, "netlab (2)" in the groups tree and the tab title, and viewing the
   tab clears them.
-- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_history` (L337–356) and `MessageBuffer` (L36–59: `deque(maxlen=200)` per room, `recent(..., limit=50)` for the AI)
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_history` (L349–368) and `MessageBuffer` (L36–69: `deque(maxlen=200)` per room, `recent(..., limit=50)` for the AI)
 - **Code snapshot 2:** `client.py` → `ChatApp.request_history` + `on_history` (L851–874: history first, then the divider, then the live messages that waited)
 - **Code snapshot 3:** `client.py` → `ChatApp.on_msg` (L727–743: counting unread) and `show_unread` + `badge` (L884–902)
 - **Talking points:** history is checked on the **server** like every other read, so a modified client still can't fetch someone
   else's DM; the whole reply is one frame (oldest messages are dropped if it would pass 1 MiB); unread counts need no protocol
-  message because the client already sees every message it receives.
-- **Proof:** `tests/test_history.py` → `Special3HistoryTests` (L21–130: late joiner, non-member refused, DM history after a
+  message because the client already sees every message it receives; message ids (room + `ts`) are unique because
+  `MessageBuffer.next_ts` makes timestamps strictly increase per room, even when the Windows clock (15 ms ticks) repeats.
+- **Proof:** `tests/test_history.py` → `Special3HistoryTests` (L23–159: late joiner, non-member refused, DM history after a
   reconnect, the 200 cap, Summarize still reads 50, reply goes to the requester only); `scripts/e2e_gui_check.py` (the "S3" checks:
   badges appear and clear, history after reopening a tab and after a reconnect, divider position, no duplicates)
 - **AI prompt:** P8
