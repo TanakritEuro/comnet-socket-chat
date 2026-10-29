@@ -131,6 +131,15 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(ai.describe(ai.Config("", ["m"])), "offline summaries only (no GEMINI_API_KEY)")
         self.assertEqual(ai.describe(ai.Config("secret", ["m1", "m2"])), "Gemini models m1 -> m2")
 
+    def test_env_example_matches_the_team_chain(self):
+        """.env.example must list the same chain as ai.py, so nobody copies a stale list into .env."""
+        example = Path(__file__).resolve().parent.parent / ".env.example"
+        defaults = ai.load_config("does-not-exist.env", environ={}).models
+        self.assertEqual(ai.load_config(example, environ={}).models, defaults)
+        self.assertEqual(defaults[0], "gemini-3.5-flash-lite")
+        self.assertNotIn("gemini-3.5-flash", defaults)          # not in the free tier
+        self.assertFalse(any(m.startswith("gemma") for m in defaults))   # too slow on the free tier
+
 
 if __name__ == "__main__":
     unittest.main()

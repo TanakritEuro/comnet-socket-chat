@@ -26,11 +26,14 @@ a **simple chat application built with socket programming**. Group of 4 students
 | AI feature | Chat summarization through the Google Gemini REST API, called **from the server** with `urllib.request` over HTTPS | Keeps the API key on the server only. If no key is set, fall back to a simple offline summary so the demo never breaks |
 | Dependencies | **Standard library only** (optionally `python-dotenv`, but parsing `.env` by hand is fine) | Zero setup on lab machines |
 
-Default model `gemini-3.1-flash-lite` (env `GEMINI_MODEL`), then `gemini-3.5-flash-lite` and `gemini-3.5-flash`
-(env `GEMINI_FALLBACK_MODELS`, comma-separated) on HTTP 429/404/503. The free tier is tiny (5–10 requests/min, 20/day
-per model), so tests and `scripts/e2e_gui_check.py` must mock the HTTP call or force offline mode. Never make real calls in tests.
-Model names get retired: Google answers HTTP 404 "no longer available to new users" (the 2.5 models did). If that happens, list the models
-your key can use (`GET /v1beta/models`) and update the defaults in `ai.py` and `.env.example`.
+Team model chain (`ai.py` defaults, mirrored in `.env.example`): `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` →
+`gemini-3.8-flash` → `gemini-3-flash-preview` → `gemini-2.5-flash-lite` → `gemini-2.5-flash`. HTTP 429/404/503 moves to the next
+model; a timeout or any other error stops the chain. Free-tier limits are per Google Cloud project, 5–15 requests/min per model,
+and the daily quota resets at midnight Pacific time. So tests and `scripts/e2e_gui_check.py` must mock the HTTP call or force
+offline mode. Never make real calls in tests.
+The 2.5 models are not retired, but Google serves them only to keys that used them before; other keys get HTTP 404 "no longer
+available to new users". Gemma 4 (`gemma-4-31b-it`) is left out: it didn't answer within 60 s on the free tier. To change the chain,
+list the models your key can use (`GET /v1beta/models`) and update `ai.py` and `.env.example` together.
 
 ## Planned layout
 
