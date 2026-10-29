@@ -27,8 +27,14 @@ log = logging.getLogger("ai")
 
 ENV_FILE = Path(__file__).resolve().parent / ".env"
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-DEFAULT_MODEL = "gemini-3.1-flash-lite"
-DEFAULT_FALLBACKS = "gemini-3.5-flash-lite,gemini-3.5-flash"
+# The team-wide model chain, tried in this order (keep .env.example in sync; a test checks it).
+# Fast Flash-Lite models with the highest free-tier rate limits first, stronger 5-RPM Flash models next,
+# and the 2.5 models last: Google serves those only to keys that used them before, so other keys
+# get a quick 404 and move on.
+# Not in the chain: gemma-4-31b-it timed out (no answer within 15 s, nor 60 s with thinking set to
+# "minimal") in our free-tier tests, and gemini-3.5-flash (non-Lite) is not in the free tier.
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_FALLBACKS = "gemini-3.1-flash-lite,gemini-3.8-flash,gemini-3-flash-preview,gemini-2.5-flash-lite,gemini-2.5-flash"
 TIMEOUT = 15                        # seconds to wait for Google before giving up
 TRY_NEXT_MODEL = {404, 429, 503}    # model not found / rate-limited / overloaded: another model may work
 OFFLINE = "offline"                 # the "model" name we report for the offline summary
