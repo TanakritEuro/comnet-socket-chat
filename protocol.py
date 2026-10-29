@@ -32,6 +32,7 @@ GROUP_CREATE = "GROUP_CREATE"   # {"group"}                creator becomes the o
 GROUP_JOIN = "GROUP_JOIN"       # {"group"}                adds the sender only (R10)
 GROUP_LEAVE = "GROUP_LEAVE"     # {"group"}
 GROUP_MSG = "GROUP_MSG"         # {"group", "text"}        members only (R11)
+HISTORY = "HISTORY"             # {"room"} -> {"room", "messages"}   past messages you may read (special 3)
 SUMMARIZE = "SUMMARIZE"         # {"room"}                 AI summary of a room you can see (special 1)
 BOT_ASK = "BOT_ASK"             # {"text", "room"?}        ask the chatbot; "room" adds that room's recent chat as context
 BOT_CLEAR = "BOT_CLEAR"         # {}                       forget this connection's chatbot conversation (no reply)

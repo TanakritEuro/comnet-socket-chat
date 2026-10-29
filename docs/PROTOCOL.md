@@ -38,7 +38,7 @@ TCP is a byte stream with no message boundaries, so every message is framed like
 | `GROUP_JOIN` | `group` | Only adds **the sender** (R10). Any extra field naming another user is ignored |
 | `GROUP_LEAVE` | `group` | Removes the sender. The group stays listed even when it has no members |
 | `GROUP_MSG` | `group`, `text` | Rejected with `NOT_MEMBER` unless the sender is a member (R11). Delivered as `MSG` to the members who are online, including the sender |
-| `HISTORY` | `room` | Request past messages for a room you're allowed to see |
+| `HISTORY` | `room` | Past messages of a room you can read (special 3): your own DM, or a group you're a member of, and for a group only messages from after you joined (same check as `SUMMARIZE`). The client sends it whenever a room tab opens. Errors (with `request: "HISTORY"`): `BAD_REQUEST` (not a room id), `NO_SUCH_GROUP`, `NOT_MEMBER` |
 | `TYPING` | `room`, `on` (bool) | Forwarded to the other room participants |
 | `FILE` | `room`, `filename`, `size`, `data` (base64) | Same routing/privacy rules as text. Max 5 MiB raw |
 | `SUMMARIZE` | `room` | AI summary of a room you can read: your own DM, or a group you're a member of (special 1). Uses the server's buffer (last 50 messages; for a group, only those sent after you joined). Errors: `BAD_REQUEST` (not a room id), `NO_SUCH_GROUP`, `NOT_MEMBER`, `BUSY` (your previous summary isn't finished) |
@@ -58,7 +58,7 @@ TCP is a byte stream with no message boundaries, so every message is framed like
 | `GROUPS` | `groups: [{name, creator, members:[...]}]` | All groups (R9). Broadcast on every create/join/leave |
 | `MSG` | `room`, `from`, `text`, `ts` | A chat message in a DM or group room |
 | `FILE` | `room`, `from`, `filename`, `size`, `data`, `ts` | |
-| `HISTORY` | `room`, `messages: [MSG or FILE objects]` | Group history only includes messages from after the requester joined |
+| `HISTORY` | `room`, `messages: [MSG or FILE objects]` | Sent **only to the requester**. `messages` are the stored objects exactly as they were delivered (same `ts`, so a message keeps its id), oldest first: up to the last 200 of the room, and only from after the requester joined for a group. If a few huge messages would make the reply bigger than 1 MiB, the oldest ones are left out |
 | `TYPING` | `room`, `from`, `on` | |
 | `SUMMARY` | `room`, `text`, `model` | Sent **only to the requester**, usually a few seconds later. `model` = the Gemini model that answered (e.g. `gemini-3.1-flash-lite`) or `"offline"` when no AI was used (no key, no messages, or every model failed) |
 | `TRANSLATION` | `room`, `ts`, `to`, `source`, `text`, `model` | Sent **only to the requester**. `room` + `ts` name the original message, `source` is the detected language code (e.g. `th`), `text` the translation, `model` the Gemini model that answered |
@@ -75,17 +75,25 @@ Before `WELCOME`, any message other than `HELLO` gets `ERROR BAD_REQUEST`. An un
 The chatbot is **not a room**: `BOT_ASK` / `BOT_REPLY` never use a room id, are never written to the message buffer
 and are never sent to anyone but the asker. UI and per-feature details: [`AI_FEATURES.md`](AI_FEATURES.md).
 
-**Status:** `SUMMARIZE` / `SUMMARY` and `BOT_ASK` / `BOT_CLEAR` / `BOT_REPLY` are implemented. `TRANSLATE` and `SENTIMENT` with
-their replies are **specified here but not implemented yet**; until then the server answers them with `ERROR BAD_REQUEST`. `HISTORY`, `TYPING`, `FILE` and `NOTICE` are Part 3 and not implemented
-yet; the server currently answers them with `ERROR BAD_REQUEST`.
+**Status:** `SUMMARIZE` / `SUMMARY`, `BOT_ASK` / `BOT_CLEAR` / `BOT_REPLY` and `HISTORY` are implemented. `TRANSLATE` and
+`SENTIMENT` with their replies are **specified here but not implemented yet**; until then the server answers them with
+`ERROR BAD_REQUEST`. `TYPING`, `FILE` and `NOTICE` are Part 3 and not implemented yet; the server currently answers them with
+`ERROR BAD_REQUEST`.
+
+**Unread badges** (special 3) need no message of their own: the client counts the `MSG`s from other people that arrive for a room
+whose tab isn't on screen, and clears the count when that tab is viewed.
 
 ## Message buffer
 
-The server keeps the last **50** delivered `MSG` objects of every room in memory (`MessageBuffer` in `server.py`, one
-`collections.deque(maxlen=50)` per room id). It is lost when the server restarts. Reading from it follows the delivery rules:
+The server keeps the last **200** delivered `MSG` objects of every room in memory (`MessageBuffer` in `server.py`, one
+`collections.deque(maxlen=200)` per room id). It is lost when the server restarts. Reading from it follows the delivery rules:
 a DM room only by its two participants, a group room only by current members, and only messages sent at or after the time
-that member joined (the server records join times on create/join and forgets them on leave). `SUMMARIZE` uses it today;
-`HISTORY` is meant to reuse the same buffer and the same check (`visible_since`).
+that member joined (the server records join times on create/join and forgets them on leave). The check is `visible_since`.
+
+- `HISTORY` returns all the readable messages it holds (up to 200).
+- `SUMMARIZE` and `BOT_ASK` with a `room` hand only the **newest 50** of them to the AI (`recent(..., limit=50)` is the default),
+  so a long history doesn't cost more AI tokens.
+- A message's id is its room + `ts`. `MessageBuffer.find(room, ts)` looks one up (for `TRANSLATE` / `SENTIMENT`).
 
 ## Login sequence
 
@@ -108,10 +116,10 @@ messages, and someone who reconnects with the same name is still in their groups
 | `NO_SUCH_GROUP` | join/leave/message a group that doesn't exist |
 | `GROUP_EXISTS` | `GROUP_CREATE` with a name already used by a group |
 | `ALREADY_MEMBER` | `GROUP_JOIN` on a group you're already in |
-| `NOT_MEMBER` | `GROUP_MSG` or `GROUP_LEAVE` on a group you're not in, or `SUMMARIZE` of a room you can't read |
+| `NOT_MEMBER` | `GROUP_MSG` or `GROUP_LEAVE` on a group you're not in, or `SUMMARIZE` / `HISTORY` of a room you can't read |
 | `TOO_LARGE` | frame over 10 MiB (connection is closed) |
 | `BUSY` | `SUMMARIZE` while your previous summary is still being prepared, or `BOT_ASK` while the previous question is unanswered |
-| `NO_SUCH_MESSAGE` | `TRANSLATE` / `SENTIMENT` for a `ts` that is not in the room's buffer (older than the last 50, sent before you joined, or never existed) |
+| `NO_SUCH_MESSAGE` | `TRANSLATE` / `SENTIMENT` for a `ts` that is not in the room's buffer (older than the last 200, sent before you joined, or never existed) |
 | `AI_FAILED` | The AI call for `TRANSLATE`, `SENTIMENT` or `BOT_ASK` failed (no API key, quota used up, network error) and there is no fallback answer |
 
 ## Example session
@@ -125,6 +133,8 @@ C→S  {"type":"GROUP_CREATE","group":"netlab"}
 S→*  {"type":"GROUPS","groups":[{"name":"netlab","creator":"alice","members":["alice"]}]}
 C→S  {"type":"DM","to":"bob","text":"hi"}
 S→alice,bob  {"type":"MSG","room":"dm:alice|bob","from":"alice","text":"hi","ts":1793066669.5}
+C→S  {"type":"HISTORY","room":"dm:alice|bob"}
+S→alice  {"type":"HISTORY","room":"dm:alice|bob","messages":[{"type":"MSG","room":"dm:alice|bob","from":"alice","text":"hi","ts":1793066669.5}]}
 C→S  {"type":"SUMMARIZE","room":"dm:alice|bob"}
 S→alice  {"type":"SUMMARY","room":"dm:alice|bob","text":"- alice greeted bob","model":"gemini-3.1-flash-lite"}
 C→S  {"type":"TRANSLATE","room":"dm:alice|bob","ts":1793066669.5,"to":"th"}
