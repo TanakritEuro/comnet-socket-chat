@@ -7,6 +7,7 @@ receives a message, so privacy (R7, R11) cannot be bypassed by a modified client
 """
 
 import argparse
+import json
 import logging
 import os
 import socket
@@ -18,7 +19,7 @@ import ai
 import ai_bot
 from protocol import (
     AI_FAILED, ALREADY_MEMBER, BAD_NAME, BAD_REQUEST, BOT_ASK, BOT_CLEAR, BOT_REPLY, BUSY, BYE,
-    DM, ERROR, GROUP_CREATE, GROUP_EXISTS, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO,
+    DM, ERROR, GROUP_CREATE, GROUP_EXISTS, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO, HISTORY,
     MAX_NAME_LEN, MSG, NAME_TAKEN, NO_SUCH_GROUP, NO_SUCH_USER, NOT_MEMBER, SUMMARIZE, SUMMARY,
     USERS, WELCOME,
     ProtocolError, clean_name, dm_room, group_room, recv_msg, send_msg,
@@ -27,14 +28,17 @@ from protocol import (
 log = logging.getLogger("server")
 
 NAME_RULES = f"must be 1-{MAX_NAME_LEN} characters and must not contain '|'"
-BUFFER_SIZE = 50        # messages kept per room
+BUFFER_SIZE = 200       # messages kept per room (chat history, special 3)
+AI_CONTEXT = 50         # newest messages handed to the AI, so a long history doesn't cost more tokens
+HISTORY_MAX_BYTES = 1024 * 1024   # one HISTORY reply stays far below the 10 MiB frame limit
 
 
 class MessageBuffer:
     """The last BUFFER_SIZE chat messages of every room, in memory only (lost on restart).
 
-    Stores the exact MSG dicts that were delivered, so the planned HISTORY reply can send
-    them back unchanged. Today it feeds AI summaries. Caller must hold ChatServer.lock.
+    Stores the exact MSG dicts that were delivered, so HISTORY sends them back unchanged and a
+    message keeps its id (room + ts). AI summaries and the chatbot read the newest AI_CONTEXT
+    of them. Caller must hold ChatServer.lock.
     """
 
     def __init__(self, size=BUFFER_SIZE):
@@ -44,9 +48,25 @@ class MessageBuffer:
     def add(self, msg):
         self.rooms[msg["room"]].append(msg)
 
-    def recent(self, room, since=0.0):
-        """Messages of a room sent at or after `since` (a Unix time), oldest first."""
-        return [m for m in self.rooms.get(room, ()) if m["ts"] >= since]
+    def recent(self, room, since=0.0, limit=AI_CONTEXT):
+        """Messages of a room sent at or after `since` (a Unix time), oldest first.
+        Only the newest `limit` of them; limit=None means all that are kept (used by HISTORY)."""
+        messages = [m for m in self.rooms.get(room, ()) if m["ts"] >= since]
+        return messages if limit is None else messages[-limit:]
+
+    def find(self, room, ts):
+        """The message of `room` whose id (server timestamp) is `ts`, or None if it isn't kept any more."""
+        return next((m for m in self.rooms.get(room, ()) if m["ts"] == ts), None)
+
+    def next_ts(self, room):
+        """Timestamp for a new message in `room`, strictly after the room's previous one, so room + ts is
+        a unique id. time.time() can repeat: on Windows it only ticks about every 15 ms, so two messages
+        sent at once could get the same value. Then we use the previous ts + 1 microsecond."""
+        now = time.time()
+        previous = self.rooms.get(room)
+        if previous and now <= previous[-1]["ts"]:
+            return previous[-1]["ts"] + 0.000001
+        return now
 
 
 class ChatServer:
@@ -83,6 +103,7 @@ class ChatServer:
             GROUP_JOIN: self.handle_group_join,
             GROUP_LEAVE: self.handle_group_leave,
             GROUP_MSG: self.handle_group_msg,
+            HISTORY: self.handle_history,
             SUMMARIZE: self.handle_summarize,
             BOT_ASK: self.handle_bot_ask,
             BOT_CLEAR: self.handle_bot_clear,
@@ -256,7 +277,8 @@ class ChatServer:
                 return self.send_error(me, BAD_REQUEST, "you cannot send a DM to yourself")
             if not isinstance(to, str) or to not in self.clients:
                 return self.send_error(me, NO_SUCH_USER, f"{to!r} is not online")
-            out = {"type": MSG, "room": dm_room(name, to), "from": name, "text": text, "ts": time.time()}
+            room = dm_room(name, to)
+            out = {"type": MSG, "room": room, "from": name, "text": text, "ts": self.buffer.next_ts(room)}
             self.buffer.add(out)
             # Privacy is decided here: no other client's socket is ever written to.
             self.send(me, out)                  # echo, so the sender's window shows it too
@@ -317,11 +339,33 @@ class ChatServer:
                 return self.send_error(me, NOT_MEMBER, f"join {group!r} before sending to it")
             if not is_text(text):
                 return self.send_error(me, BAD_REQUEST, "text must be a non-empty string")
-            out = {"type": MSG, "room": group_room(group), "from": name, "text": text, "ts": time.time()}
+            room = group_room(group)
+            out = {"type": MSG, "room": room, "from": name, "text": text, "ts": self.buffer.next_ts(room)}
             self.buffer.add(out)
             for member in info["members"]:
                 if member in self.clients:      # members who are offline right now miss it
                     self.send(self.clients[member], out)
+
+    def handle_history(self, name, msg):
+        """Special 3: send a room's past messages back to the requester only.
+
+        Same privacy check as SUMMARIZE (visible_since): a DM only to its two people, a group only
+        to current members and only messages from after they joined. Anyone else gets an ERROR.
+        """
+        room = msg.get("room")
+        with self.lock:
+            me = self.clients[name]
+            since = self.visible_since(me, name, room, request=HISTORY)
+            if since is None:
+                return                          # an ERROR was already sent
+            messages = self.buffer.recent(room, since, limit=None)
+            # The whole history travels in one frame. If a few huge messages would make it too big,
+            # leave out the oldest ones rather than fail (send_msg refuses frames over MAX_FRAME).
+            sizes = [len(json.dumps(m, ensure_ascii=False).encode("utf-8")) for m in messages]
+            while messages and sum(sizes) > HISTORY_MAX_BYTES:
+                messages.pop(0)
+                sizes.pop(0)
+            self.send(me, {"type": HISTORY, "room": room, "messages": messages})
 
     def handle_summarize(self, name, msg):
         """Special 1: AI summary of a room the sender can see, sent back to the sender only.

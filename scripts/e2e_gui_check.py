@@ -26,7 +26,7 @@ import tkinter as tk
 import ai
 import ai_bot
 import client
-from protocol import HELLO, MSG, SUMMARY, recv_msg, send_msg
+from protocol import DM, HELLO, MSG, SUMMARY, recv_msg, send_msg
 from server import ChatServer
 
 TIMEOUT = 3.0           # seconds to wait for the GUI to show something
@@ -167,7 +167,7 @@ def main():
     check("R8  bob's #net lab tab opens", wait_until(root, lambda: "group:net lab" in bob.rooms))
     check("R9  alice sees the group with 1 member",
           wait_until(root, lambda: alice.group_tree.exists("group:net lab")
-                     and alice.group_tree.item("group:net lab", "text") == "net lab  (1 members)"))
+                     and alice.group_tree.item("group:net lab", "text") == "net lab · 1 member"))
     members = [alice.group_tree.item(i, "text") for i in alice.group_tree.get_children("group:net lab")]
     check("R8  creator is the only member", members == ["bob (creator)"])
     check("R10 alice was not added automatically", "group:net lab" not in alice.rooms)
@@ -256,6 +256,68 @@ def main():
     bob.create_group()                                      # "net lab" again
     check("ERR duplicate group shows GROUP_EXISTS", wait_until(root, lambda: any(p[1] == "GROUP_EXISTS" for p in popups)))
 
+    # Special 3: unread badges. alice looks at the group tab while bob writes to her privately.
+    def users_of(app):
+        return app.user_list.get(0, "end")
+
+    def tab_title(app, tab):
+        return app.notebook.tab(tab, "text")
+
+    alice.notebook.select(group_tab)
+    wait_until(root, lambda: False, timeout=0.1)
+    bob_dm.entry.insert(0, "are you there?")
+    bob_dm.send()
+    check("S3  unread DM shows 'bob (1)' in alice's user list", wait_until(root, lambda: "bob (1)" in users_of(alice)))
+    check("S3  ... and on alice's @bob tab title", tab_title(alice, dm) == "@bob (1)")
+    bob_dm.entry.insert(0, "hello?")
+    bob_dm.send()
+    check("S3  the count goes up with each message", wait_until(root, lambda: "bob (2)" in users_of(alice)))
+    alice.notebook.select(dm)
+    check("S3  viewing the tab clears the badge",
+          wait_until(root, lambda: "bob" in users_of(alice) and tab_title(alice, dm) == "@bob"))
+
+    # A group message while alice looks at the DM tab; her own messages never count.
+    bob_group = bob.rooms["group:net lab"]
+    bob_group.entry.insert(0, "group ping")
+    bob_group.send()
+    check("S3  unread group shows 'net lab (1)' in the groups tree",
+          wait_until(root, lambda: alice.group_tree.item("group:net lab", "text").startswith("net lab (1) · ")))
+    check("S3  ... and on the #net lab tab title", tab_title(alice, group_tab) == "#net lab (1)")
+    group_tab.entry.insert(0, "my own message")
+    group_tab.send()
+    wait_until(root, lambda: "my own message" in text_of(group_tab))
+    check("S3  own messages never count", tab_title(alice, group_tab) == "#net lab (1)")
+    alice.notebook.select(group_tab)
+    check("S3  viewing the group clears tree and tab",
+          wait_until(root, lambda: tab_title(alice, group_tab) == "#net lab"
+                     and alice.group_tree.item("group:net lab", "text") == "net lab · 2 members · ✓ joined"))
+
+    # A message for a room whose tab isn't open yet still counts, and is shown exactly once.
+    send_msg(carol, {"type": DM, "to": "alice", "text": "hi from carol"})
+    check("S3  a room with no open tab gets a badge too", wait_until(root, lambda: "carol (1)" in users_of(alice)))
+    check("S3  that message is shown once, after its history loads",
+          wait_until(root, lambda: text_of(alice.rooms["dm:alice|carol"]).count("hi from carol") == 1
+                     and "dm:alice|carol" not in alice.waiting))
+    alice.notebook.select(alice.rooms["dm:alice|carol"])
+    check("S3  opening that tab clears its badge", wait_until(root, lambda: "carol" in users_of(alice)))
+
+    # Special 3: history. alice closes the @bob tab and opens it again.
+    alice.close_room("dm:alice|bob")
+    alice.user_list.selection_clear(0, "end")
+    alice.user_list.selection_set(alice.users.index("bob"))
+    alice.on_user_double_click(None)
+    reopened = alice.rooms["dm:alice|bob"]
+    check("S3  history appears after reopening a tab",
+          wait_until(root, lambda: "hi bob, private" in text_of(reopened) and "hello?" in text_of(reopened)))
+    check("S3  history sits above the 'earlier messages' divider",
+          text_of(reopened).index("hello?") < text_of(reopened).index("earlier messages"))
+    check("S3  every old message is shown once", text_of(reopened).count("hi bob, private") == 1)
+    bob_dm.entry.insert(0, "new after reopen")
+    bob_dm.send()
+    check("S3  new messages go below the divider",
+          wait_until(root, lambda: "new after reopen" in text_of(reopened))
+          and text_of(reopened).index("earlier messages") < text_of(reopened).index("new after reopen"))
+
     if args.screenshot:
         alice.notebook.select(group_tab)
         bob.notebook.select(bob.rooms["group:net lab"])
@@ -274,6 +336,19 @@ def main():
     bob.quit()
     check("R4  list updates when bob closes his window",
           wait_until(root, lambda: alice.user_list.get(0, "end") == ("alice (you)", "carol")))
+
+    # Special 3: bob logs in again with the same name. His group tab reopens with its history,
+    # and so does his private chat with alice when he opens it.
+    log_in(tk.Toplevel(root), port, "bob", apps)
+    bob = apps["bob"]
+    check("S3  group tab reopens with its history after a reconnect",
+          wait_until(root, lambda: "group:net lab" in bob.rooms and "hello group" in text_of(bob.rooms["group:net lab"])))
+    wait_until(root, lambda: "alice" in bob.users)
+    bob.user_list.selection_set(bob.users.index("alice"))
+    bob.on_user_double_click(None)
+    check("S3  DM history survives a reconnect",
+          wait_until(root, lambda: "new after reopen" in text_of(bob.rooms["dm:alice|bob"])))
+    bob.quit()
 
     carol.close()
     root.destroy()

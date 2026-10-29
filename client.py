@@ -22,7 +22,7 @@ from tkinter import font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 
 from protocol import (
     BOT_ASK, BOT_CLEAR, BOT_REPLY, BYE, DM, ERROR, GROUP_CREATE, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG,
-    GROUPS, HELLO, MAX_NAME_LEN, MSG, NAME_TAKEN, SUMMARIZE, SUMMARY, USERS, WELCOME,
+    GROUPS, HELLO, HISTORY, MAX_NAME_LEN, MSG, NAME_TAKEN, SUMMARIZE, SUMMARY, USERS, WELCOME,
     ProtocolError, clean_name, dm_partner, dm_room, group_room, recv_msg, send_msg,
 )
 
@@ -193,6 +193,7 @@ def make_chat_window(parent):
     window.tag_configure("stamp", foreground=GRAY, font=SMALL)
     window.tag_configure("notice", foreground="gray", font=ITALIC)
     window.tag_configure("note", foreground=GRAY, font=SMALL_ITALIC)
+    window.tag_configure("divider", foreground="#9AA5B5", font=SMALL, justify="center", spacing1=6, spacing3=2)
     # AI summaries get a tinted, indented block so nobody mistakes them for a chat message.
     window.tag_configure("summary_title", foreground="#613583", background="#f3eefa",
                          font=BOLD, lmargin1=8, lmargin2=8, spacing1=6)
@@ -420,6 +421,10 @@ class RoomTab(ttk.Frame):
         """Append a grey status line, e.g. "You joined #netlab"."""
         self.append(text + "\n", "notice")
 
+    def add_divider(self):
+        """Special 3: a thin line under the history, so new messages are easy to tell apart."""
+        self.append("──────────  earlier messages  ──────────\n", "divider")
+
     def append(self, text, *tags):
         append_text(self.window, text, *tags)
 
@@ -550,8 +555,11 @@ class ChatApp:
         self.last_room = None               # room id of the chat tab the user looked at last
         self.users = []                   # online names, in the order shown in the user list
         self.groups = {}                    # group name -> {"creator": ..., "members": [...]}
+        self.waiting = {}                   # room id -> live messages that arrived before its HISTORY (special 3)
+        self.unread = {}                    # room id -> number of unread messages from other people (special 3)
         self.handlers = {USERS: self.on_users, GROUPS: self.on_groups, MSG: self.on_msg,
-                         SUMMARY: self.on_summary, BOT_REPLY: self.on_bot_reply, ERROR: self.on_error}
+                         SUMMARY: self.on_summary, BOT_REPLY: self.on_bot_reply, ERROR: self.on_error,
+                         HISTORY: self.on_history}
 
         self.build_widgets()
         root.title(f"Socket Chat: {name}")
@@ -681,7 +689,7 @@ class ChatApp:
         self.users = [self.me] + [u for u in msg["users"] if u != self.me]
         self.user_list.delete(0, "end")
         for user in self.users:
-            self.user_list.insert("end", f"{user} (you)" if user == self.me else user)
+            self.user_list.insert("end", self.user_label(user))
         self.users_label.config(text=f"Online users · {len(self.users)} (double-click to chat)".upper())
 
     def member_text(self, member, info):
@@ -702,9 +710,8 @@ class ChatApp:
 
         self.group_tree.delete(*self.group_tree.get_children())
         for group, info in self.groups.items():
-            label = f"{group}  ({len(info['members'])} members)" + ("  ✓ joined" if group in is_member else "")
             # The item id is the room id, e.g. "group:netlab", so it can't clash with Tk's own ids.
-            parent = self.group_tree.insert("", "end", iid=group_room(group), text=label, open=True)
+            parent = self.group_tree.insert("", "end", iid=group_room(group), text=self.group_label(group), open=True)
             for member in info["members"]:
                 self.group_tree.insert(parent, "end", text=self.member_text(member, info))
 
@@ -727,7 +734,13 @@ class ChatApp:
             tab = self.open_group(room.removeprefix("group:"), select=False)
         else:
             return
-        tab.add_message(msg["from"], msg["text"], msg["ts"], mine=msg["from"] == self.me)
+        if room in self.waiting:            # the tab's history isn't here yet: show this after it
+            self.waiting[room].append(msg)
+        else:
+            self.show_message(tab, msg)
+        if msg["from"] != self.me and not self.is_viewing(room):
+            self.unread[room] = self.unread.get(room, 0) + 1
+            self.show_unread()
 
     def on_summary(self, msg):
         """Special 1: the server's summary, sent only to us. Shown in that room's tab."""
@@ -742,6 +755,10 @@ class ChatApp:
 
     def on_error(self, msg):
         """The server refused a request (e.g. GROUP_EXISTS, NO_SUCH_USER)."""
+        if msg.get("request") == HISTORY:   # a history couldn't load: just show the live messages we held back
+            for room in list(self.waiting):
+                self.on_history({"room": room, "messages": []})
+            return
         if msg.get("request") == BOT_ASK:   # the chatbot failed: show it in its tab instead of a pop-up
             if self.bot_tab is not None:
                 self.bot_tab.failed(msg.get("message") or "Couldn't get an answer. Try again.")
@@ -773,6 +790,7 @@ class ChatApp:
                 on_mood=lambda ts: self.analyze_mood(room, ts),
                 title=title, subtitle=subtitle)
             self.notebook.add(self.rooms[room], text=title)
+            self.request_history(room)
         if select:
             self.notebook.select(self.rooms[room])
             self.rooms[room].entry.focus_set()
@@ -812,13 +830,87 @@ class ChatApp:
         if tab is not None:
             self.notebook.forget(tab)
             tab.destroy()
+        self.waiting.pop(room, None)
+        if self.unread.pop(room, None):
+            self.show_unread()
 
     def on_tab_changed(self, event):
-        """Remember the last chat room the user looked at (the chatbot's "Explain my last chat" uses it)."""
+        """Remember the last chat room the user looked at (the chatbot's "Explain my last chat" uses it),
+        and mark its messages as read."""
         current = self.notebook.nametowidget(self.notebook.select())
         for room, tab in self.rooms.items():
             if tab is current:
                 self.last_room = room
+                if self.unread.pop(room, None):
+                    self.show_unread()
+
+    # ------------------------------------------------------------------
+    # Special 3: chat history and unread badges
+    # ------------------------------------------------------------------
+
+    def request_history(self, room):
+        """A room tab just opened: ask the server for its past messages. Live messages that arrive
+        before the answer wait in self.waiting, so history always comes first and nothing is shown twice."""
+        self.waiting[room] = []
+        if not self.send(HISTORY, room=room):
+            del self.waiting[room]
+
+    def on_history(self, msg):
+        """The server's HISTORY: past messages first, then a divider, then the live messages that waited."""
+        room = msg["room"]
+        tab, waiting = self.rooms.get(room), self.waiting.pop(room, [])
+        if tab is None:
+            return                          # the tab was closed meanwhile
+        # Live messages that waited are also in the history (the server saved them before sending them
+        # to us). They stay below the divider, as new messages; every message is shown once (keyed by ts).
+        waiting_ts = {m["ts"] for m in waiting}
+        past = [m for m in msg["messages"] if m["ts"] not in waiting_ts and m["ts"] not in tab.by_ts]
+        for m in past:
+            self.show_message(tab, m)
+        if past:
+            tab.add_divider()
+        for m in waiting:
+            if m["ts"] not in tab.by_ts:
+                self.show_message(tab, m)
+
+    def show_message(self, tab, msg):
+        tab.add_message(msg["from"], msg["text"], msg["ts"], mine=msg["from"] == self.me)
+
+    def is_viewing(self, room):
+        """True if this room's tab is the one on screen right now."""
+        tab = self.rooms.get(room)
+        return tab is not None and self.notebook.select() == str(tab)
+
+    def show_unread(self):
+        """Redraw every unread badge: "bob (3)" in the user list, "netlab (2)" in the groups tree, and tab titles."""
+        selection = self.user_list.curselection()
+        self.user_list.delete(0, "end")
+        for user in self.users:
+            self.user_list.insert("end", self.user_label(user))
+        for index in selection:
+            self.user_list.selection_set(index)
+        for group in self.groups:
+            if self.group_tree.exists(group_room(group)):
+                self.group_tree.item(group_room(group), text=self.group_label(group))
+        for room, tab in self.rooms.items():
+            title = f"@{dm_partner(room, self.me)}" if room.startswith("dm:") else f"#{room.removeprefix('group:')}"
+            self.notebook.tab(tab, text=title + self.badge(room))
+
+    def badge(self, room):
+        """" (3)" if the room has 3 unread messages, else ""."""
+        count = self.unread.get(room, 0)
+        return f" ({count})" if count else ""
+
+    def user_label(self, user):
+        """A row of the online list: "alice (you)", or "bob (3)" when our private chat has 3 unread."""
+        return f"{user} (you)" if user == self.me else user + self.badge(dm_room(self.me, user))
+
+    def group_label(self, group):
+        """A group row of the tree, e.g. "netlab (2) · 3 members · ✓ joined" (2 = unread messages)."""
+        info = self.groups[group]
+        count = len(info["members"])
+        label = f"{group}{self.badge(group_room(group))} · {count} member{'s' if count != 1 else ''}"
+        return label + (" · ✓ joined" if self.me in info["members"] else "")
 
     # ------------------------------------------------------------------
     # AI feature plug-in points. Each returns True if the request was sent, and the tab then shows
