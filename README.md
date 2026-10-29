@@ -69,7 +69,8 @@ conversation. It uses the same `.env` key and model list as the summaries. Witho
 
 ## How to demo on 2+ computers
 
-R1 requires **at least two clients on different physical computers**. The server can run on a third PC or on one of them.
+R1 requires **at least two clients on different physical computers**. The server can run on a third PC or on one of them,
+or on a cloud VM so the laptops can be on any network (see [Running the server on Google Cloud](#running-the-server-on-google-cloud)).
 Architecture and protocol explanation: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 **0. Same network.** Put every PC on the same Wi-Fi or LAN. Some campus or public Wi-Fi networks use *client isolation*,
@@ -142,6 +143,17 @@ python client.py --host 192.168.1.20 --name alice     # or just: python client.p
 | Server log says `Gemini <model> answered HTTP 404` | Google retired that model for new keys. List the models your key can use (`GET https://generativelanguage.googleapis.com/v1beta/models`, key in the `x-goog-api-key` header) and set `GEMINI_MODEL` / `GEMINI_FALLBACK_MODELS` in `.env` |
 | `HTTP 503` or `TimeoutError` in the log | The model is overloaded (preview models often are). Try a non-preview model such as a `-flash-lite` one |
 | The assistant says "couldn't answer right now" | The server could not get an answer from Gemini. The reason is in the server log (see the rows above) |
+
+### Running the server on Google Cloud
+
+Instead of one of the laptops, the server can run on a free **Google Cloud e2-micro VM** (us-west1). Then every client
+connects to the VM's external IP on port 5050 from **any** network (home Wi-Fi, a phone hotspot), with no Windows Firewall
+or LAN setup on the laptops. Clients only make outgoing connections, so NAT and client isolation don't matter.
+
+- Full step-by-step guide (one person, about 30–45 min): [`deploy/README.md`](deploy/README.md)
+- The server runs as a systemd service: [`deploy/chat-server.service`](deploy/chat-server.service)
+- Teammates only need: `python client.py`, Host = the VM's external IP (shared in the group chat, never committed), Port = `5050`
+- Diagram: the cloud variant in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#cloud-variant-google-cloud-vm)
 
 ## Team workflow
 

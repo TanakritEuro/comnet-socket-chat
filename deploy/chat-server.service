@@ -1,0 +1,30 @@
+# systemd unit for the chat server on a Linux VM (see deploy/README.md, Part F).
+#
+# It keeps server.py running after you close SSH, restarts it if it crashes, and starts it when the VM boots.
+# Install it from the repo folder on the VM; sed puts your Linux user name in place of YOUR_LINUX_USER:
+#
+#   sed "s/YOUR_LINUX_USER/$USER/g" deploy/chat-server.service | sudo tee /etc/systemd/system/chat-server.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now chat-server
+#   sudo systemctl status chat-server        # should say "active (running)"; press q to leave
+#
+# After editing this file in the repo, run the same commands again (or the sed line + daemon-reload + restart).
+
+[Unit]
+Description=Socket chat server
+# Start only once the network is up, so the server can bind its port right away.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Placeholders: the Linux account that owns the clone, and the folder you cloned the repo into.
+User=YOUR_LINUX_USER
+WorkingDirectory=/home/YOUR_LINUX_USER/comnet-socket-chat
+# 0.0.0.0 = listen on every network interface of the VM; 5050 must match the firewall rule.
+ExecStart=/usr/bin/python3 server.py --host 0.0.0.0 --port 5050
+# Send log lines to journalctl immediately instead of buffering them.
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
