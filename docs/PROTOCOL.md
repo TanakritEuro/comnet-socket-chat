@@ -20,6 +20,7 @@ TCP is a byte stream with no message boundaries, so every message is framed like
 - A body that is not UTF-8 JSON, or not an object with a string `"type"`, gets `ERROR BAD_REQUEST` and the connection is closed.
 - JSON is sent with `ensure_ascii=False`, so Thai text travels as real UTF-8.
 - Every JSON object has a `"type"` field. Timestamps (`ts`) are Unix seconds (float), set by the **server**.
+  Within one room, message timestamps are **strictly increasing**, so room + `ts` identifies one message.
 
 ## Room ids
 
@@ -94,6 +95,8 @@ that member joined (the server records join times on create/join and forgets the
 - `SUMMARIZE` and `BOT_ASK` with a `room` hand only the **newest 50** of them to the AI (`recent(..., limit=50)` is the default),
   so a long history doesn't cost more AI tokens.
 - A message's id is its room + `ts`. `MessageBuffer.find(room, ts)` looks one up (for `TRANSLATE` / `SENTIMENT`).
+- `ts` comes from `MessageBuffer.next_ts(room)`: the current time, or the room's previous `ts` + 1 µs if the clock
+  hasn't moved on (on Windows `time.time()` only ticks about every 15 ms, so two messages could otherwise share a `ts`).
 
 ## Login sequence
 

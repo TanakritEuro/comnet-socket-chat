@@ -58,6 +58,16 @@ class MessageBuffer:
         """The message of `room` whose id (server timestamp) is `ts`, or None if it isn't kept any more."""
         return next((m for m in self.rooms.get(room, ()) if m["ts"] == ts), None)
 
+    def next_ts(self, room):
+        """Timestamp for a new message in `room`, strictly after the room's previous one, so room + ts is
+        a unique id. time.time() can repeat: on Windows it only ticks about every 15 ms, so two messages
+        sent at once could get the same value. Then we use the previous ts + 1 microsecond."""
+        now = time.time()
+        previous = self.rooms.get(room)
+        if previous and now <= previous[-1]["ts"]:
+            return previous[-1]["ts"] + 0.000001
+        return now
+
 
 class ChatServer:
     """Holds the shared chat state and runs one thread per connected client.
@@ -267,7 +277,8 @@ class ChatServer:
                 return self.send_error(me, BAD_REQUEST, "you cannot send a DM to yourself")
             if not isinstance(to, str) or to not in self.clients:
                 return self.send_error(me, NO_SUCH_USER, f"{to!r} is not online")
-            out = {"type": MSG, "room": dm_room(name, to), "from": name, "text": text, "ts": time.time()}
+            room = dm_room(name, to)
+            out = {"type": MSG, "room": room, "from": name, "text": text, "ts": self.buffer.next_ts(room)}
             self.buffer.add(out)
             # Privacy is decided here: no other client's socket is ever written to.
             self.send(me, out)                  # echo, so the sender's window shows it too
@@ -328,7 +339,8 @@ class ChatServer:
                 return self.send_error(me, NOT_MEMBER, f"join {group!r} before sending to it")
             if not is_text(text):
                 return self.send_error(me, BAD_REQUEST, "text must be a non-empty string")
-            out = {"type": MSG, "room": group_room(group), "from": name, "text": text, "ts": time.time()}
+            room = group_room(group)
+            out = {"type": MSG, "room": room, "from": name, "text": text, "ts": self.buffer.next_ts(room)}
             self.buffer.add(out)
             for member in info["members"]:
                 if member in self.clients:      # members who are offline right now miss it

@@ -4,8 +4,10 @@ Uses the same real-server-plus-raw-socket setup as test_server.py. No AI calls a
 """
 
 import sys
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # so "import server" works from any folder
 sys.path.insert(0, str(Path(__file__).resolve().parent))          # so "import test_server" works too
@@ -121,6 +123,33 @@ class Special3HistoryTests(ServerTestCase):
         given = self.summarized[0]
         self.assertEqual((len(given), given[0], given[-1]), (server.AI_CONTEXT, "m70", "m119"))
 
+    def test_two_messages_in_the_same_clock_tick_keep_different_ids(self):
+        """time.time() may return the same value twice (Windows ticks about every 15 ms).
+        Each message must still get its own ts, so history shows both and find() tells them apart."""
+        with mock.patch("server.time.time", return_value=1793066669.5):     # the clock "stands still"
+            first = self.dm(self.alice, "bob", self.bob, "same tick 1")
+            second = self.dm(self.bob, "alice", self.alice, "same tick 2")
+        self.assertLess(first["ts"], second["ts"])
+        self.assertEqual([m["text"] for m in self.history(self.alice, "dm:alice|bob")], ["same tick 1", "same tick 2"])
+        with self.server.lock:
+            self.assertEqual(self.server.buffer.find("dm:alice|bob", first["ts"])["text"], "same tick 1")
+            self.assertEqual(self.server.buffer.find("dm:alice|bob", second["ts"])["text"], "same tick 2")
+
+    def test_two_people_posting_to_a_group_at_once_keep_different_ids(self):
+        self.create_group(self.alice, "netlab")
+        self.bob.send(GROUP_JOIN, group="netlab")
+        self.alice.wait_for(GROUPS, groups=[{"name": "netlab", "creator": "alice", "members": ["alice", "bob"]}])
+        frozen = time.time() + 100                              # after both join times, so both may read them
+        with mock.patch("server.time.time", return_value=frozen):
+            self.alice.send(GROUP_MSG, group="netlab", text="alice at once")
+            self.bob.send(GROUP_MSG, group="netlab", text="bob at once")
+            # The server may handle either one first, so take the two messages in whatever order they come.
+            arrived = {self.alice.wait_for(MSG)["text"] for _ in range(2)}
+            self.assertEqual(arrived, {"alice at once", "bob at once"})
+        history = self.history(self.bob, "group:netlab")
+        self.assertEqual(sorted(m["text"] for m in history), ["alice at once", "bob at once"])
+        self.assertEqual(len({m["ts"] for m in history}), 2)    # two different ids
+
     def test_huge_messages_are_left_out_so_the_reply_fits_in_one_frame(self):
         big = "x" * 600_000                                     # two of these exceed HISTORY_MAX_BYTES
         self.dm(self.alice, "bob", self.bob, "old " + big)
@@ -140,6 +169,21 @@ class MessageBufferTests(unittest.TestCase):
         self.assertIsNone(buffer.find("group:x", 4.0))
         self.assertEqual([m["text"] for m in buffer.recent("dm:a|b", limit=None)], ["m2", "m3", "m4"])
         self.assertEqual([m["text"] for m in buffer.recent("dm:a|b", since=3.0)], ["m3", "m4"])
+
+    def test_next_ts_is_strictly_increasing_per_room(self):
+        buffer = server.MessageBuffer()
+        with mock.patch("server.time.time", return_value=100.0):
+            stamps = []
+            for i in range(3):
+                ts = buffer.next_ts("dm:a|b")
+                buffer.add({"type": MSG, "room": "dm:a|b", "from": "a", "text": f"m{i}", "ts": ts})
+                stamps.append(ts)
+            self.assertEqual(buffer.next_ts("group:other"), 100.0)   # another room is not affected
+        self.assertEqual(stamps[0], 100.0)
+        self.assertTrue(stamps[0] < stamps[1] < stamps[2])
+        self.assertEqual([buffer.find("dm:a|b", ts)["text"] for ts in stamps], ["m0", "m1", "m2"])
+        with mock.patch("server.time.time", return_value=200.0):     # a clock that moved on is used as is
+            self.assertEqual(buffer.next_ts("dm:a|b"), 200.0)
 
 
 if __name__ == "__main__":
