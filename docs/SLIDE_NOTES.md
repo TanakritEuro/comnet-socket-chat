@@ -152,6 +152,13 @@ certificate problem and that Google had retired the 2.5 models for new keys.
 > 5. Add the cloud special point to docs/SLIDE_NOTES.md: what it is, why a VM (raw TCP needs a long-running process and an open port, which static or serverless hosts can't provide), the firewall rule, systemd, and the update steps. Quote this prompt.
 > Docs only, no code changes. Run the unit tests anyway, then open a PR and stop.
 
+**Prompt P10** (file and image sending, PR `feat/special2-file-image`):
+
+> i got assign for implementing sent image and file feature
+> can u do this
+
+(Claude followed CLAUDE.md and docs/PROTOCOL.md, which already specified a `FILE` message: new branch, server handler with the same privacy check as HISTORY, client attach button / preview / save, tests, e2e checks, and these docs.)
+
 ## R1: System architecture
 Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides are in [`docs/diagrams/`](diagrams/)
 (re-render with `python scripts/render_diagrams.py` after editing the Mermaid blocks).
@@ -362,6 +369,31 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   8 ways to check that these tests fail when they should.
 - **AI prompt:** P6
 ## Special 2: File / image sending
+- **How:** The **📎 Attach** button opens a file dialog. The client reads the file (max **5 MiB**, checked before sending) and sends
+  `FILE {room, filename, size, data}` where `data` is the bytes as **base64** text, because our frames hold JSON and JSON can't carry
+  raw bytes (base64 makes it about 4/3 bigger, so 5 MiB becomes about 6.7 MB, still under the 10 MiB frame limit). The server checks
+  the room with the same `visible_since` rule as HISTORY (a DM only for its two people, a group only for members), then decodes the
+  data itself, **measures its real size**, strips any folder from the file name, and delivers `FILE {room, from, filename, size, data, ts}`
+  to the same people who would get a text message there, plus an echo to the sender. The receiving window shows the name, size and a
+  **Save as…** link; **PNG and GIF images** also get an inline preview, shrunk to at most 320 px (Tk can draw those without extra
+  libraries; JPEG would need Pillow, so a JPEG shows as a normal file).
+- **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_file` (L356–402: room check, name cleaning, base64 decode, size
+  limit, delivery to the room's people only)
+- **Code snapshot 2:** `client.py` → `ChatApp.send_file` (L967–988: read, limit check, base64, `FILE`), `RoomTab.add_file` +
+  `add_preview` + `save_file` (L345–399: the file line, the preview, saving the decoded bytes)
+- **Code snapshot 3:** `server.py` → `MessageBuffer.add` (L51: a file over 256 KiB is kept in history without its bytes);
+  `protocol.py` → `clean_filename` (L150: `"..\\..\\evil.exe"` becomes `"evil.exe"`)
+- **Talking points:** it is still plain TCP sockets, with no HTTP upload; the server never trusts the client (the real size is measured
+  from the decoded bytes, and the file name can't carry a path); privacy is the same server-side check as every other room read; a
+  file over 5 MiB is refused with `TOO_LARGE` but the connection stays open; history keeps small files (up to 256 KiB, with their
+  bytes) and big ones as a name and size only, so 200 messages can't fill the server's RAM; the AI (summary, chatbot) sees a file as
+  `[sent a file: name]` and **never** the base64 bytes (`ai.message_text`). Known limits: sending a 5 MiB file blocks the sender's
+  window for a moment (sent from the GUI thread), and the server holds its lock while delivering it.
+- **Proof:** `tests/test_file.py` (DM and group delivery, bytes arrive unchanged, non-member and someone else's DM refused, bad
+  base64 / empty / bad name, exactly 5 MiB passes and 5 MiB + 1 byte is refused, the server's size and cleaned name, history with and
+  without bytes, the AI never sees the bytes); `scripts/e2e_gui_check.py` (the "S2" checks: send a text file, preview of a PNG,
+  Save as… writes the same bytes, a file over 5 MiB is refused on the client, files come back from history)
+- **AI prompt:** P10
 ## Special 3: Chat history + unread badges
 - **How:** The server keeps the last **200** messages of every room in memory (the same `MessageBuffer` Summarize uses; the AI
   still reads only the newest 50). When a room tab opens, including after logging in again with the same name, the client
