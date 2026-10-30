@@ -117,13 +117,21 @@ def summarize(room, messages, config=None):
     return offline_summary(messages, "Gemini unavailable"), OFFLINE
 
 
+def message_text(m):
+    """The text of a buffered message. A file message has no text, so describe it in one line:
+    the file's bytes (base64) must never be sent to the AI."""
+    if m.get("type") == "FILE":
+        return f"[sent a file: {m.get('filename', '?')}]"
+    return m.get("text", "")
+
+
 def build_prompt(room, messages):
     """Turn the room's messages into a transcript, one "[HH:MM] name: text" line each."""
     kind = "private chat" if room.startswith("dm:") else "group chat"
     lines = [f"Chat room: {room} ({kind})", "Transcript:"]
     for m in messages:
         stamp = time.strftime("%H:%M", time.localtime(m.get("ts", 0)))
-        lines.append(f"[{stamp}] {m.get('from', '?')}: {m.get('text', '')}")
+        lines.append(f"[{stamp}] {m.get('from', '?')}: {message_text(m)}")
     return "\n".join(lines)
 
 
@@ -169,6 +177,6 @@ def offline_summary(messages, reason):
         "Last messages:",
     ]
     for m in messages[-3:]:
-        text = m.get("text", "")
+        text = message_text(m)
         lines.append(f"- {m.get('from', '?')}: {text if len(text) <= 80 else text[:77] + '...'}")
     return "\n".join(lines)

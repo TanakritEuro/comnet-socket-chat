@@ -41,7 +41,7 @@ TCP is a byte stream with no message boundaries, so every message is framed like
 | `GROUP_MSG` | `group`, `text` | Rejected with `NOT_MEMBER` unless the sender is a member (R11). Delivered as `MSG` to the members who are online, including the sender |
 | `HISTORY` | `room` | Past messages of a room you can read (special 3): your own DM, or a group you're a member of, and for a group only messages from after you joined (same check as `SUMMARIZE`). The client sends it whenever a room tab opens. Errors (with `request: "HISTORY"`): `BAD_REQUEST` (not a room id), `NO_SUCH_GROUP`, `NOT_MEMBER` |
 | `TYPING` | `room`, `on` (bool) | Forwarded to the other room participants |
-| `FILE` | `room`, `filename`, `size`, `data` (base64) | Same routing/privacy rules as text. Max 5 MiB raw |
+| `FILE` | `room`, `filename`, `size`, `data` (base64) | Send a file or image to a room (special 2). `room` is a room id: a DM with someone online, or a group you're a member of (same rules as `DM` / `GROUP_MSG`: only the people in the room get it). `data` is the file's bytes as base64 text, max **5 MiB raw**. The server decodes and measures the data itself, so it ignores your `size`, and it keeps only the part of `filename` after the last `/` or `\`, so no folder paths. Errors (with `request: "FILE"`): `BAD_REQUEST` (not a room id, bad filename, data not base64 or empty, a DM with yourself), `NO_SUCH_GROUP`, `NOT_MEMBER`, `NO_SUCH_USER` (DM partner offline), `TOO_LARGE` (over 5 MiB; the connection stays open) |
 | `SUMMARIZE` | `room` | AI summary of a room you can read: your own DM, or a group you're a member of (special 1). Uses the server's buffer (last 50 messages; for a group, only those sent after you joined). Errors: `BAD_REQUEST` (not a room id), `NO_SUCH_GROUP`, `NOT_MEMBER`, `BUSY` (your previous summary isn't finished) |
 | `TRANSLATE` | `room`, `ts`, `to` | Translate **one message** (special: translation). The message is named by its room and its server timestamp `ts`; the server finds it in the [message buffer](#message-buffer) and checks you may read that room, so a client cannot make the server translate arbitrary text. `to` is a language code: `en`, `th`, `ja`, `zh` or `es`. Errors: `BAD_REQUEST`, `NO_SUCH_GROUP`, `NOT_MEMBER`, `NO_SUCH_MESSAGE`, `AI_FAILED` |
 | `SENTIMENT` | `room`, `ts` | Analyze the mood of **one message**, named the same way as in `TRANSLATE`. Errors: `BAD_REQUEST`, `NO_SUCH_GROUP`, `NOT_MEMBER`, `NO_SUCH_MESSAGE` (and `AI_FAILED` if there is no offline fallback) |
@@ -58,7 +58,7 @@ TCP is a byte stream with no message boundaries, so every message is framed like
 | `USERS` | `users: [name, ...]` | Full list incl. the receiver itself (R4). Broadcast on every connect/disconnect |
 | `GROUPS` | `groups: [{name, creator, members:[...]}]` | All groups (R9). Broadcast on every create/join/leave |
 | `MSG` | `room`, `from`, `text`, `ts` | A chat message in a DM or group room |
-| `FILE` | `room`, `from`, `filename`, `size`, `data`, `ts` | |
+| `FILE` | `room`, `from`, `filename`, `size`, `data`, `ts` | A file in a DM or group room, delivered to the same people as a `MSG` there, **including the sender** (an echo, like `MSG`). `size` is in bytes, measured by the server. `ts` is the message id, from the same counter as `MSG`. In a `HISTORY` reply, a file bigger than 256 KiB has `"data": null` (the server doesn't keep big files), so the client shows its name and size only |
 | `HISTORY` | `room`, `messages: [MSG or FILE objects]` | Sent **only to the requester**. `messages` are the stored objects exactly as they were delivered (same `ts`, so a message keeps its id), oldest first: up to the last 200 of the room, and only from after the requester joined for a group. If a few huge messages would make the reply bigger than 1 MiB, the oldest ones are left out |
 | `TYPING` | `room`, `from`, `on` | |
 | `SUMMARY` | `room`, `text`, `model` | Sent **only to the requester**, usually a few seconds later. `model` = the Gemini model that answered (e.g. `gemini-3.1-flash-lite`) or `"offline"` when no AI was used (no key, no messages, or every model failed) |
@@ -78,8 +78,8 @@ and are never sent to anyone but the asker. UI and per-feature details: [`AI_FEA
 
 **Status:** `SUMMARIZE` / `SUMMARY`, `BOT_ASK` / `BOT_CLEAR` / `BOT_REPLY` and `HISTORY` are implemented. `TRANSLATE` and
 `SENTIMENT` with their replies are **specified here but not implemented yet**; until then the server answers them with
-`ERROR BAD_REQUEST`. `TYPING`, `FILE` and `NOTICE` are Part 3 and not implemented yet; the server currently answers them with
-`ERROR BAD_REQUEST`.
+`ERROR BAD_REQUEST`. `FILE` (special 2) is implemented. `TYPING` and `NOTICE` are not implemented yet; the server currently
+answers them with `ERROR BAD_REQUEST`.
 
 **Unread badges** (special 3) need no message of their own: the client counts the `MSG`s from other people that arrive for a room
 whose tab isn't on screen, and clears the count when that tab is viewed.
@@ -95,6 +95,10 @@ that member joined (the server records join times on create/join and forgets the
 - `SUMMARIZE` and `BOT_ASK` with a `room` hand only the **newest 50** of them to the AI (`recent(..., limit=50)` is the default),
   so a long history doesn't cost more AI tokens.
 - A message's id is its room + `ts`. `MessageBuffer.find(room, ts)` looks one up (for `TRANSLATE` / `SENTIMENT`).
+- The buffer holds `MSG` **and `FILE`** objects (`"type"` tells them apart). A `FILE` has no `"text"`, so code that reads
+  buffered messages must check the type: `TRANSLATE` / `SENTIMENT` answer `BAD_REQUEST` for a file, and the AI only ever
+  sees `[sent a file: name]` through `ai.message_text` (the file's bytes are never sent to Gemini).
+- A file of up to 256 KiB is stored with its data. A bigger one is stored with `data: null`, so 200 messages can't use gigabytes of RAM.
 - `ts` comes from `MessageBuffer.next_ts(room)`: the current time, or the room's previous `ts` + 1 µs if the clock
   hasn't moved on (on Windows `time.time()` only ticks about every 15 ms, so two messages could otherwise share a `ts`).
 
@@ -119,8 +123,8 @@ messages, and someone who reconnects with the same name is still in their groups
 | `NO_SUCH_GROUP` | join/leave/message a group that doesn't exist |
 | `GROUP_EXISTS` | `GROUP_CREATE` with a name already used by a group |
 | `ALREADY_MEMBER` | `GROUP_JOIN` on a group you're already in |
-| `NOT_MEMBER` | `GROUP_MSG` or `GROUP_LEAVE` on a group you're not in, or `SUMMARIZE` / `HISTORY` of a room you can't read |
-| `TOO_LARGE` | frame over 10 MiB (connection is closed) |
+| `NOT_MEMBER` | `GROUP_MSG` or `GROUP_LEAVE` on a group you're not in, or `SUMMARIZE` / `HISTORY` / `FILE` of a room you can't read |
+| `TOO_LARGE` | frame over 10 MiB (connection is closed); or a `FILE` over 5 MiB (rejected with `request: "FILE"`, connection stays open) |
 | `BUSY` | `SUMMARIZE` while your previous summary is still being prepared, or `BOT_ASK` while the previous question is unanswered |
 | `NO_SUCH_MESSAGE` | `TRANSLATE` / `SENTIMENT` for a `ts` that is not in the room's buffer (older than the last 200, sent before you joined, or never existed) |
 | `AI_FAILED` | The AI call for `TRANSLATE`, `SENTIMENT` or `BOT_ASK` failed (no API key, quota used up, network error) and there is no fallback answer |
