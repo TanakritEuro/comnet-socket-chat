@@ -21,8 +21,9 @@ import tkinter as tk
 from tkinter import font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 
 from protocol import (
-    BOT_ASK, BOT_CLEAR, BOT_REPLY, BYE, DM, ERROR, GROUP_CREATE, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG,
-    GROUPS, HELLO, HISTORY, MAX_NAME_LEN, MSG, NAME_TAKEN, SUMMARIZE, SUMMARY, USERS, WELCOME,
+    AI_FAILED, BOT_ASK, BOT_CLEAR, BOT_REPLY, BYE, DM, ERROR, GROUP_CREATE, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG,
+    GROUPS, HELLO, HISTORY, MAX_NAME_LEN, MSG, NAME_TAKEN, SUMMARIZE, SUMMARY, TRANSLATE, TRANSLATION, USERS,
+    WELCOME,
     ProtocolError, clean_name, dm_partner, dm_room, group_room, recv_msg, send_msg,
 )
 
@@ -372,9 +373,11 @@ class RoomTab(ttk.Frame):
         route = f"{names.get(source, source)} → {names.get(target, target)}" if source else f"to {names.get(target, target)}"
         self.replace_slot(ts, "tr", [(f"Translated · {route}\n", ("ai_title",)), (text.strip() + "\n", ("ai_text",))])
 
-    def translation_failed(self, ts):
-        """Show an error block with a Try again link (the original text is unchanged)."""
-        self.replace_slot(ts, "tr", [("Couldn't translate this message.  ", ("ai_error",)),
+    def translation_failed(self, ts, reason=None):
+        """Show an error block with a Try again link (the original text is unchanged).
+        `reason` is the server's explanation when retrying won't help (e.g. the message is gone)."""
+        why = f": {reason}" if reason else "."
+        self.replace_slot(ts, "tr", [(f"Couldn't translate this message{why}  ", ("ai_error",)),
                                      ("Try again", ("ai_error", "link")), ("\n", ("ai_error",))])
 
     # Sentiment (magga) ------------------------------------------------
@@ -558,8 +561,8 @@ class ChatApp:
         self.waiting = {}                   # room id -> live messages that arrived before its HISTORY (special 3)
         self.unread = {}                    # room id -> number of unread messages from other people (special 3)
         self.handlers = {USERS: self.on_users, GROUPS: self.on_groups, MSG: self.on_msg,
-                         SUMMARY: self.on_summary, BOT_REPLY: self.on_bot_reply, ERROR: self.on_error,
-                         HISTORY: self.on_history}
+                         SUMMARY: self.on_summary, TRANSLATION: self.on_translation, BOT_REPLY: self.on_bot_reply,
+                         ERROR: self.on_error, HISTORY: self.on_history}
 
         self.build_widgets()
         root.title(f"Socket Chat: {name}")
@@ -748,6 +751,12 @@ class ChatApp:
         if tab is not None:                 # the tab may have closed (e.g. we left the group)
             tab.add_summary(msg["text"], msg["model"])
 
+    def on_translation(self, msg):
+        """Translation: the server's answer, sent only to us. Replaces "Translating…" under that message."""
+        tab = self.rooms.get(msg["room"])
+        if tab is not None:                 # the tab may have closed meanwhile
+            tab.add_translation(msg["ts"], msg["text"], msg["source"], msg["to"])
+
     def on_bot_reply(self, msg):
         """Special 4: the chatbot's answer, sent only to us. Replaces "Thinking…" in the assistant tab."""
         if self.bot_tab is not None:
@@ -755,6 +764,12 @@ class ChatApp:
 
     def on_error(self, msg):
         """The server refused a request (e.g. GROUP_EXISTS, NO_SUCH_USER)."""
+        if msg.get("request") == TRANSLATE:     # a translation failed: show it under that message, no pop-up
+            tab = self.rooms.get(msg.get("room"))
+            if tab is not None:
+                # A temporary failure just offers "Try again"; for any other refusal say why.
+                tab.translation_failed(msg.get("ts"), None if msg.get("code") == AI_FAILED else msg.get("message"))
+            return
         if msg.get("request") == HISTORY:   # a history couldn't load: just show the live messages we held back
             for room in list(self.waiting):
                 self.on_history({"room": room, "messages": []})
@@ -919,9 +934,9 @@ class ChatApp:
     # ------------------------------------------------------------------
 
     def translate_message(self, room, ts, to):
-        """Translation: the Translate link under the message `ts` of `room` was clicked."""
-        self.rooms[room].add_notice("Translation isn't available yet.")
-        return False
+        """Translation: the Translate link under the message `ts` of `room` was clicked. The server
+        looks the message up by room + ts, so we send no text. The answer arrives as TRANSLATION."""
+        return self.send(TRANSLATE, room=room, ts=ts, to=to)
 
     def analyze_mood(self, room, ts):
         """Sentiment: the Analyze mood button on the message `ts` of `room` was clicked."""
