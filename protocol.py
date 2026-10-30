@@ -38,6 +38,7 @@ HISTORY = "HISTORY"             # {"room"} -> {"room", "messages"}   past messag
 FILE = "FILE"                   # {"room", "filename", "size", "data"}   send a file or image (special 2); the server
                                 # sends the same type back to the room: {"room", "from", "filename", "size", "data", "ts"}
 SUMMARIZE = "SUMMARIZE"         # {"room"}                 AI summary of a room you can see (special 1)
+TRANSLATE = "TRANSLATE"         # {"room", "ts", "to"}     AI translation of one message you can read
 BOT_ASK = "BOT_ASK"             # {"text", "room"?}        ask the chatbot; "room" adds that room's recent chat as context
 BOT_CLEAR = "BOT_CLEAR"         # {}                       forget this connection's chatbot conversation (no reply)
 BYE = "BYE"                     # {}                       clean disconnect
@@ -49,6 +50,7 @@ USERS = "USERS"                 # {"users": [...]}         everyone online, incl
 GROUPS = "GROUPS"               # {"groups": [{"name", "creator", "members"}]}   (R9)
 MSG = "MSG"                     # {"room", "from", "text", "ts"}
 SUMMARY = "SUMMARY"             # {"room", "text", "model"}   only to the requester
+TRANSLATION = "TRANSLATION"     # {"room", "ts", "to", "source", "text", "model"}   only to the requester
 BOT_REPLY = "BOT_REPLY"         # {"text", "model", "ts"}     only to the asker; model "offline" = no AI was used
 
 # ERROR codes
@@ -62,6 +64,7 @@ ALREADY_MEMBER = "ALREADY_MEMBER"
 NOT_MEMBER = "NOT_MEMBER"
 TOO_LARGE = "TOO_LARGE"
 BUSY = "BUSY"
+NO_SUCH_MESSAGE = "NO_SUCH_MESSAGE"     # TRANSLATE named a message the server doesn't have (or you may not read)
 AI_FAILED = "AI_FAILED"         # an AI request failed and there is no fallback answer
 
 

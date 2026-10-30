@@ -28,8 +28,9 @@ import tkinter as tk
 
 import ai
 import ai_bot
+import ai_translate
 import client
-from protocol import DM, FILE, HELLO, MSG, SUMMARY, recv_msg, send_msg
+from protocol import DM, FILE, HELLO, MSG, SUMMARY, TRANSLATION, recv_msg, send_msg
 from server import ChatServer
 
 TIMEOUT = 3.0           # seconds to wait for the GUI to show something
@@ -110,6 +111,14 @@ def offline_bot(history, text, room, messages):
     return ai_bot.ask(history, text, room, messages, ai.Config(api_key="", models=[]))
 
 
+def fake_translator(text, to):
+    """Stands in for Gemini, so the check never uses the real API quota or reads the .env key.
+    It "translates" by tagging the text, reports Thai as the source, and fails when asked for Japanese."""
+    if to == "ja":
+        raise ai_translate.TranslateError("fake failure")
+    return f"[{to}] {text}", "th", "fake-model"
+
+
 def screenshot(windows, path):
     """Save a PNG covering the given windows (Windows only: PowerShell + .NET do the capture)."""
     left = min(w.winfo_rootx() for w in windows) - 10
@@ -139,7 +148,7 @@ def main():
     record_popups()
 
     # port 0: the OS picks a free port
-    server = ChatServer("127.0.0.1", 0, summarizer=offline_summarizer, bot=offline_bot)
+    server = ChatServer("127.0.0.1", 0, summarizer=offline_summarizer, bot=offline_bot, translator=fake_translator)
     port = server.start()
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
@@ -216,20 +225,32 @@ def main():
     check("AI  'Translate to' picker starts on English", bob_dm.language_box.get() == "English" and bob_dm.language_code() == "en")
     bob.notebook.select(bob_dm)
     wait_until(root, lambda: False, timeout=0.3)
-    x, y, *_ = bob_dm.window.bbox(bob_dm.window.tag_ranges("link")[0])
-    bob_dm.window.event_generate("<Motion>", x=x + 3, y=y + 3)         # Tk decides which tag is under the mouse on Motion
-    bob_dm.window.event_generate("<Button-1>", x=x + 3, y=y + 3)       # a real click on the Translate link
-    check("AI  clicking Translate without a feature shows a notice and keeps the link",
-          wait_until(root, lambda: "Translation isn't available yet." in text_of(bob_dm)) and bool(bob_dm.window.tag_ranges("link")))
+
+    def click_link():
+        """A real click on the (first) link in bob's tab: the Translate link, or the Try again link."""
+        x, y, *_ = bob_dm.window.bbox(bob_dm.window.tag_ranges("link")[0])
+        bob_dm.window.event_generate("<Motion>", x=x + 3, y=y + 3)     # Tk decides which tag is under the mouse on Motion
+        bob_dm.window.event_generate("<Button-1>", x=x + 3, y=y + 3)
+
+    # Translation: a real click, a real TRANSLATE to the server, and a fake translator in place of Gemini.
+    click_link()
+    check("AI  clicking Translate shows the translation under the message",
+          wait_until(root, lambda: "Translated · Thai → English" in text_of(bob_dm) and "[en] " in text_of(bob_dm)))
+    check("AI  the Translate link is replaced by the result", not bob_dm.window.tag_ranges("link"))
+    check("AI  the translation is private to bob",
+          "Translated" not in text_of(dm) and not any(m["type"] == TRANSLATION for m in raw_messages(carol)))
+    bob_dm.language_box.current(2)                                     # Japanese: the fake translator fails for it
+    bob_dm.translate(alice_ts)
+    check("AI  a failed translation shows an error with Try again, not a pop-up",
+          wait_until(root, lambda: "Couldn't translate this message." in text_of(bob_dm) and bool(bob_dm.window.tag_ranges("link")))
+          and not any(p[1] == "AI_FAILED" for p in popups))
+    bob_dm.language_box.current(0)                                     # back to English
+    click_link()                                                       # click Try again
+    check("AI  Try again works", wait_until(root, lambda: "Translated · Thai → English" in text_of(bob_dm))
+          and "Couldn't translate" not in text_of(bob_dm))
+
     bob_dm.analyze(alice_ts)
     check("AI  Analyze mood without a feature shows a notice", "Mood analysis isn't available yet." in text_of(bob_dm))
-    bob_dm.show_translating(alice_ts)
-    check("AI  'Translating…' replaces the link", "Translating…" in text_of(bob_dm) and not bob_dm.window.tag_ranges("link"))
-    bob_dm.add_translation(alice_ts, "สวัสดี", "en", "th")
-    check("AI  translated block appears", "Translated · English → Thai" in text_of(bob_dm) and "สวัสดี" in text_of(bob_dm))
-    bob_dm.translation_failed(alice_ts)
-    check("AI  translation error offers Try again",
-          "Couldn't translate this message." in text_of(bob_dm) and bool(bob_dm.window.tag_ranges("link")))
     bob_dm.show_mood_pending(alice_ts)
     check("AI  'Analyzing…' replaces the button", "Analyzing…" in text_of(bob_dm) and not bob_dm.window.tag_ranges("mood_button"))
     bob_dm.set_mood(alice_ts, "positive")

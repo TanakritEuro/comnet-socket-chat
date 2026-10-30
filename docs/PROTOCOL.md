@@ -43,7 +43,7 @@ TCP is a byte stream with no message boundaries, so every message is framed like
 | `TYPING` | `room`, `on` (bool) | Forwarded to the other room participants |
 | `FILE` | `room`, `filename`, `size`, `data` (base64) | Send a file or image to a room (special 2). `room` is a room id: a DM with someone online, or a group you're a member of (same rules as `DM` / `GROUP_MSG`: only the people in the room get it). `data` is the file's bytes as base64 text, max **5 MiB raw**. The server decodes and measures the data itself, so it ignores your `size`, and it keeps only the part of `filename` after the last `/` or `\`, so no folder paths. Errors (with `request: "FILE"`): `BAD_REQUEST` (not a room id, bad filename, data not base64 or empty, a DM with yourself), `NO_SUCH_GROUP`, `NOT_MEMBER`, `NO_SUCH_USER` (DM partner offline), `TOO_LARGE` (over 5 MiB; the connection stays open) |
 | `SUMMARIZE` | `room` | AI summary of a room you can read: your own DM, or a group you're a member of (special 1). Uses the server's buffer (last 50 messages; for a group, only those sent after you joined). Errors: `BAD_REQUEST` (not a room id), `NO_SUCH_GROUP`, `NOT_MEMBER`, `BUSY` (your previous summary isn't finished) |
-| `TRANSLATE` | `room`, `ts`, `to` | Translate **one message** (special: translation). The message is named by its room and its server timestamp `ts`; the server finds it in the [message buffer](#message-buffer) and checks you may read that room, so a client cannot make the server translate arbitrary text. `to` is a language code: `en`, `th`, `ja`, `zh` or `es`. Errors: `BAD_REQUEST`, `NO_SUCH_GROUP`, `NOT_MEMBER`, `NO_SUCH_MESSAGE`, `AI_FAILED` |
+| `TRANSLATE` | `room`, `ts`, `to` | Translate **one message** (special: translation). The message is named by its room and its server timestamp `ts`; the server finds it in the [message buffer](#message-buffer) and checks you may read that room, so a client cannot make the server translate arbitrary text. `to` is a language code: `en`, `th`, `ja`, `zh` or `es`. The text is never sent by the client. A message of up to 4000 characters can be translated; only messages you may read (for a group: sent after you joined). The server remembers the last 200 finished translations, so the same message into the same language again (by you or another member) costs no AI call. Errors (each with `request: "TRANSLATE"`, `room` and `ts`): `BAD_REQUEST` (not a room id, bad `to` or `ts`, a message with no text or over 4000 characters), `NO_SUCH_GROUP`, `NOT_MEMBER`, `NO_SUCH_MESSAGE`, `BUSY` (that message is already being translated, or you already have 3 translations in progress), `AI_FAILED` |
 | `SENTIMENT` | `room`, `ts` | Analyze the mood of **one message**, named the same way as in `TRANSLATE`. Errors: `BAD_REQUEST`, `NO_SUCH_GROUP`, `NOT_MEMBER`, `NO_SUCH_MESSAGE` (and `AI_FAILED` if there is no offline fallback) |
 | `BOT_ASK` | `text`, optional `room` | Ask the chatbot. The server keeps the last 10 question/answer pairs of **this connection** as context. If `room` is given, that room's recent messages are added as context, after the same readability check as `SUMMARIZE`. Errors: `BAD_REQUEST` (blank text, bad `room`), `NOT_MEMBER`, `BUSY` (previous question not answered yet) |
 | `BOT_CLEAR` | | Forget this connection's chatbot conversation. No reply |
@@ -76,10 +76,10 @@ Before `WELCOME`, any message other than `HELLO` gets `ERROR BAD_REQUEST`. An un
 The chatbot is **not a room**: `BOT_ASK` / `BOT_REPLY` never use a room id, are never written to the message buffer
 and are never sent to anyone but the asker. UI and per-feature details: [`AI_FEATURES.md`](AI_FEATURES.md).
 
-**Status:** `SUMMARIZE` / `SUMMARY`, `BOT_ASK` / `BOT_CLEAR` / `BOT_REPLY` and `HISTORY` are implemented. `TRANSLATE` and
-`SENTIMENT` with their replies are **specified here but not implemented yet**; until then the server answers them with
-`ERROR BAD_REQUEST`. `FILE` (special 2) is implemented. `TYPING` and `NOTICE` are not implemented yet; the server currently
-answers them with `ERROR BAD_REQUEST`.
+**Status:** `SUMMARIZE` / `SUMMARY`, `BOT_ASK` / `BOT_CLEAR` / `BOT_REPLY`, `HISTORY`, `TRANSLATE` / `TRANSLATION` and
+`FILE` (special 2) are implemented. `SENTIMENT` with its reply is **specified here but not implemented yet**; until then the
+server answers it with `ERROR BAD_REQUEST`. `TYPING` and `NOTICE` are not implemented yet; the server currently answers them
+with `ERROR BAD_REQUEST`.
 
 **Unread badges** (special 3) need no message of their own: the client counts the `MSG`s from other people that arrive for a room
 whose tab isn't on screen, and clears the count when that tab is viewed.
@@ -123,9 +123,9 @@ messages, and someone who reconnects with the same name is still in their groups
 | `NO_SUCH_GROUP` | join/leave/message a group that doesn't exist |
 | `GROUP_EXISTS` | `GROUP_CREATE` with a name already used by a group |
 | `ALREADY_MEMBER` | `GROUP_JOIN` on a group you're already in |
-| `NOT_MEMBER` | `GROUP_MSG` or `GROUP_LEAVE` on a group you're not in, or `SUMMARIZE` / `HISTORY` / `FILE` of a room you can't read |
+| `NOT_MEMBER` | `GROUP_MSG` or `GROUP_LEAVE` on a group you're not in, or `SUMMARIZE` / `HISTORY` / `FILE` / `TRANSLATE` of a room you can't read |
 | `TOO_LARGE` | frame over 10 MiB (connection is closed); or a `FILE` over 5 MiB (rejected with `request: "FILE"`, connection stays open) |
-| `BUSY` | `SUMMARIZE` while your previous summary is still being prepared, or `BOT_ASK` while the previous question is unanswered |
+| `BUSY` | `SUMMARIZE` while your previous summary is still being prepared, `BOT_ASK` while the previous question is unanswered, or `TRANSLATE` for a message already being translated (or when you already have 3 translations in progress) |
 | `NO_SUCH_MESSAGE` | `TRANSLATE` / `SENTIMENT` for a `ts` that is not in the room's buffer (older than the last 200, sent before you joined, or never existed) |
 | `AI_FAILED` | The AI call for `TRANSLATE`, `SENTIMENT` or `BOT_ASK` failed (no API key, quota used up, network error) and there is no fallback answer |
 

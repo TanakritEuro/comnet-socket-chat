@@ -15,15 +15,16 @@ import os
 import socket
 import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 
 import ai
 import ai_bot
+import ai_translate
 from protocol import (
     AI_FAILED, ALREADY_MEMBER, BAD_NAME, BAD_REQUEST, BOT_ASK, BOT_CLEAR, BOT_REPLY, BUSY, BYE,
     DM, ERROR, FILE, GROUP_CREATE, GROUP_EXISTS, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO, HISTORY,
-    MAX_FILE_BYTES, MAX_NAME_LEN, MSG, NAME_TAKEN, NO_SUCH_GROUP, NO_SUCH_USER, NOT_MEMBER, SUMMARIZE,
-    SUMMARY, TOO_LARGE, USERS, WELCOME,
+    MAX_FILE_BYTES, MAX_NAME_LEN, MSG, NAME_TAKEN, NO_SUCH_GROUP, NO_SUCH_MESSAGE, NO_SUCH_USER, NOT_MEMBER,
+    SUMMARIZE, SUMMARY, TOO_LARGE, TRANSLATE, TRANSLATION, USERS, WELCOME,
     ProtocolError, clean_filename, clean_name, dm_room, group_room, recv_msg, send_msg,
 )
 
@@ -34,6 +35,8 @@ BUFFER_SIZE = 200       # messages kept per room (chat history, special 3)
 AI_CONTEXT = 50         # newest messages handed to the AI, so a long history doesn't cost more tokens
 HISTORY_MAX_BYTES = 1024 * 1024   # one HISTORY reply stays far below the 10 MiB frame limit
 HISTORY_FILE_MAX = 256 * 1024     # files bigger than this are not kept in history (200 x 5 MiB would fill the RAM)
+TRANSLATING_MAX = 3     # translations one user may have in progress at once (protects the tiny API quota)
+TRANSLATION_CACHE = 200  # finished translations kept, so the same click again costs no API call
 
 
 class MessageBuffer:
@@ -87,7 +90,8 @@ class ChatServer:
     send buffer fills up. That is acceptable for a classroom chat.
     """
 
-    def __init__(self, host="0.0.0.0", port=5050, summarizer=ai.summarize, bot=ai_bot.ask):
+    def __init__(self, host="0.0.0.0", port=5050, summarizer=ai.summarize, bot=ai_bot.ask,
+                 translator=ai_translate.translate):
         self.host = host
         self.port = port
         self.lock = threading.Lock()
@@ -100,6 +104,9 @@ class ChatServer:
         self.bot = bot                  # function(history, text, room, messages) -> (answer, model); tests swap in a fake
         self.bot_history = {}           # name -> [(question, answer), ...] the chatbot remembers for that user
         self.asking = set()             # names with a chatbot question in progress
+        self.translator = translator    # function(text, to) -> (translation, source, model); tests swap in a fake
+        self.translating = set()        # (name, room, ts) of translations in progress
+        self.translations = OrderedDict()   # (room, ts, to) -> (translation, source, model), oldest first
         self.listen_sock = None
         self.running = False
         # Which method handles which message type (after login).
@@ -112,6 +119,7 @@ class ChatServer:
             HISTORY: self.handle_history,
             FILE: self.handle_file,
             SUMMARIZE: self.handle_summarize,
+            TRANSLATE: self.handle_translate,
             BOT_ASK: self.handle_bot_ask,
             BOT_CLEAR: self.handle_bot_clear,
         }
@@ -452,6 +460,73 @@ class ChatServer:
                 self.send(sock, {"type": SUMMARY, "room": room, "text": text, "model": model})
         log.info("summary for %s in %s: %d messages, model %s", name, room, len(messages), model)
 
+    def handle_translate(self, name, msg):
+        """AI translation of ONE message, sent back to the requester only.
+
+        The message is named by its room and server timestamp `ts`, and the text is taken from the
+        server's own buffer, never from the request: a modified client can't make the server translate
+        arbitrary text, or a message from a room it may not read (same check as HISTORY, `visible_since`).
+        Like SUMMARIZE, the slow Gemini call runs in a worker thread outside the lock.
+        """
+        room, ts, to = msg.get("room"), msg.get("ts"), msg.get("to")
+        about = {"request": TRANSLATE, "room": room, "ts": ts}      # echoed in an ERROR so the client resets the right message
+        with self.lock:
+            me = self.clients[name]
+            since = self.visible_since(me, name, room, **about)
+            if since is None:
+                return                          # an ERROR was already sent
+            if not isinstance(to, str) or to not in ai_translate.LANGUAGES:
+                return self.send_error(me, BAD_REQUEST, f"'to' must be one of {', '.join(ai_translate.LANGUAGES)}", **about)
+            if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+                return self.send_error(me, BAD_REQUEST, "ts must be a message timestamp", **about)
+            original = self.buffer.find(room, ts)
+            if original is None or original["ts"] < since:      # unknown, too old, or sent before you joined
+                return self.send_error(me, NO_SUCH_MESSAGE, "that message is not available to translate", **about)
+            text = original.get("text")
+            if not isinstance(text, str) or not text.strip():
+                return self.send_error(me, BAD_REQUEST, "that message has no text to translate", **about)
+            if len(text) > ai_translate.MAX_CHARS:
+                return self.send_error(me, BAD_REQUEST, f"that message is over {ai_translate.MAX_CHARS} characters", **about)
+
+            cached = self.translations.get((room, ts, to))
+            if cached is not None:              # translated before (maybe by someone else): no API call
+                self.translations.move_to_end((room, ts, to))
+                return self.send(me, self.translation_message(room, ts, to, *cached))
+            if (name, room, ts) in self.translating:
+                return self.send_error(me, BUSY, "that message is already being translated", **about)
+            if sum(1 for who, _, _ in self.translating if who == name) >= TRANSLATING_MAX:
+                return self.send_error(me, BUSY, "wait for your other translations to finish", **about)
+            self.translating.add((name, room, ts))
+        threading.Thread(target=self.translate_worker, args=(name, me, room, ts, to, text), daemon=True).start()
+
+    def translate_worker(self, name, sock, room, ts, to, text):
+        """Worker thread: ask the AI (slow, no lock held), then reply to the requester only."""
+        result = None
+        try:
+            result = self.translator(text, to)
+        except ai_translate.TranslateError as e:
+            log.info("translation for %s failed: %s", name, e)
+        except Exception:                       # a bug must not leave the user on "Translating…"
+            log.exception("translator crashed")
+        with self.lock:
+            self.translating.discard((name, room, ts))
+            if result is not None:
+                self.translations[(room, ts, to)] = result
+                while len(self.translations) > TRANSLATION_CACHE:
+                    self.translations.popitem(last=False)       # forget the oldest
+            if self.clients.get(name) is not sock:
+                return                          # the requester left (or logged in again): nobody to answer
+            if result is None:
+                return self.send_error(sock, AI_FAILED, "the translation couldn't be made right now, try again",
+                                       request=TRANSLATE, room=room, ts=ts)
+            self.send(sock, self.translation_message(room, ts, to, *result))
+        log.info("translation for %s in %s to %s: model %s", name, room, to, result[2])
+
+    @staticmethod
+    def translation_message(room, ts, to, text, source, model):
+        """The TRANSLATION reply. `room` + `ts` name the original message, so the client shows it under that message."""
+        return {"type": TRANSLATION, "room": room, "ts": ts, "to": to, "source": source, "text": text, "model": model}
+
     def handle_bot_ask(self, name, msg):
         """Special 4: ask the chatbot. The answer goes back to the asker only.
 
@@ -510,26 +585,26 @@ class ChatServer:
         with self.lock:
             self.bot_history.pop(name, None)
 
-    def visible_since(self, sock, name, room, **extra):
+    def visible_since(self, sock, name, room_id, **extra):
         """Privacy check for reading a room's past messages (same rules as delivery, R7/R11).
 
-        Returns the Unix time from which `name` may read `room`: 0 for their own DMs, their join
-        time for a group they are in. Otherwise sends an ERROR (with the `extra` fields) and
-        returns None. Caller holds the lock.
+        Returns the Unix time from which `name` may read the room `room_id`: 0 for their own DMs, their
+        join time for a group they are in. Otherwise sends an ERROR (with the `extra` fields, which may
+        include "room" and "ts" for a per-message request) and returns None. Caller holds the lock.
         """
-        if not isinstance(room, str) or not room.startswith(("dm:", "group:")):
-            self.send_error(sock, BAD_REQUEST, f"{room!r} is not a room id", **extra)
+        if not isinstance(room_id, str) or not room_id.startswith(("dm:", "group:")):
+            self.send_error(sock, BAD_REQUEST, f"{room_id!r} is not a room id", **extra)
             return None
-        if room.startswith("dm:"):
-            if name not in room.removeprefix("dm:").split("|"):
+        if room_id.startswith("dm:"):
+            if name not in room_id.removeprefix("dm:").split("|"):
                 self.send_error(sock, NOT_MEMBER, "you can only read your own private chats", **extra)
                 return None
             return 0.0
-        info = self.find_group(sock, room.removeprefix("group:"), **extra)
+        info = self.find_group(sock, room_id.removeprefix("group:"), **extra)
         if info is None:
             return None
         if name not in info["members"]:
-            self.send_error(sock, NOT_MEMBER, f"join {room.removeprefix('group:')!r} first", **extra)
+            self.send_error(sock, NOT_MEMBER, f"join {room_id.removeprefix('group:')!r} first", **extra)
             return None
         return info["joined"][name]             # only messages from after they joined
 
