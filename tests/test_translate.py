@@ -3,6 +3,7 @@
 Every AI call is faked or mocked: these tests never touch the real API or the .env key.
 """
 
+import base64
 import io
 import json
 import logging
@@ -20,7 +21,7 @@ import ai
 import ai_translate
 import server
 from protocol import (
-    AI_FAILED, BAD_REQUEST, BUSY, DM, ERROR, GROUP_JOIN, GROUP_MSG, GROUPS, MSG, NO_SUCH_GROUP,
+    AI_FAILED, BAD_REQUEST, BUSY, DM, ERROR, FILE, GROUP_JOIN, GROUP_MSG, GROUPS, MSG, NO_SUCH_GROUP,
     NO_SUCH_MESSAGE, NOT_MEMBER, TRANSLATE, TRANSLATION,
 )
 from test_server import ServerTestCase
@@ -335,11 +336,10 @@ class TranslateServerTests(ServerTestCase):
         sent = self.dm(self.alice, "bob", self.bob, long_text)
         self.translate(self.bob, "dm:alice|bob", sent["ts"])
         self.assertEqual(self.bob.wait_for(ERROR)["code"], BAD_REQUEST)
-        # A buffered message that has no "text" (like a file) is refused with BAD_REQUEST instead of crashing.
-        with self.server.lock:
-            self.server.buffer.add({"type": "FILE", "room": "dm:alice|bob", "from": "alice", "filename": "a.png",
-                                    "size": 3, "data": "AAAA", "ts": 4102444800.0})
-        self.translate(self.bob, "dm:alice|bob", 4102444800.0)
+        # A file in the buffer has no "text": it is refused with BAD_REQUEST instead of crashing, and the AI is never asked.
+        self.alice.send(FILE, room="dm:alice|bob", filename="a.png", size=3, data=base64.b64encode(b"abc").decode())
+        sent_file = self.bob.wait_for(FILE)
+        self.translate(self.bob, "dm:alice|bob", sent_file["ts"])
         self.assertEqual(self.bob.wait_for(ERROR)["code"], BAD_REQUEST)
         self.assertEqual(self.calls, [])
 

@@ -7,6 +7,8 @@ receives a message, so privacy (R7, R11) cannot be bypassed by a modified client
 """
 
 import argparse
+import base64
+import binascii
 import json
 import logging
 import os
@@ -20,10 +22,10 @@ import ai_bot
 import ai_translate
 from protocol import (
     AI_FAILED, ALREADY_MEMBER, BAD_NAME, BAD_REQUEST, BOT_ASK, BOT_CLEAR, BOT_REPLY, BUSY, BYE,
-    DM, ERROR, GROUP_CREATE, GROUP_EXISTS, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO, HISTORY,
-    MAX_NAME_LEN, MSG, NAME_TAKEN, NO_SUCH_GROUP, NO_SUCH_MESSAGE, NO_SUCH_USER, NOT_MEMBER, SUMMARIZE,
-    SUMMARY, TRANSLATE, TRANSLATION, USERS, WELCOME,
-    ProtocolError, clean_name, dm_room, group_room, recv_msg, send_msg,
+    DM, ERROR, FILE, GROUP_CREATE, GROUP_EXISTS, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO, HISTORY,
+    MAX_FILE_BYTES, MAX_NAME_LEN, MSG, NAME_TAKEN, NO_SUCH_GROUP, NO_SUCH_MESSAGE, NO_SUCH_USER, NOT_MEMBER,
+    SUMMARIZE, SUMMARY, TOO_LARGE, TRANSLATE, TRANSLATION, USERS, WELCOME,
+    ProtocolError, clean_filename, clean_name, dm_room, group_room, recv_msg, send_msg,
 )
 
 log = logging.getLogger("server")
@@ -32,6 +34,7 @@ NAME_RULES = f"must be 1-{MAX_NAME_LEN} characters and must not contain '|'"
 BUFFER_SIZE = 200       # messages kept per room (chat history, special 3)
 AI_CONTEXT = 50         # newest messages handed to the AI, so a long history doesn't cost more tokens
 HISTORY_MAX_BYTES = 1024 * 1024   # one HISTORY reply stays far below the 10 MiB frame limit
+HISTORY_FILE_MAX = 256 * 1024     # files bigger than this are not kept in history (200 x 5 MiB would fill the RAM)
 TRANSLATING_MAX = 3     # translations one user may have in progress at once (protects the tiny API quota)
 TRANSLATION_CACHE = 200  # finished translations kept, so the same click again costs no API call
 
@@ -49,6 +52,9 @@ class MessageBuffer:
         self.rooms = defaultdict(lambda: deque(maxlen=size))
 
     def add(self, msg):
+        if msg["type"] == FILE and msg["size"] > HISTORY_FILE_MAX:
+            # Keep the name and size so history still shows that the file was sent, but drop the bytes.
+            msg = {**msg, "data": None}
         self.rooms[msg["room"]].append(msg)
 
     def recent(self, room, since=0.0, limit=AI_CONTEXT):
@@ -111,6 +117,7 @@ class ChatServer:
             GROUP_LEAVE: self.handle_group_leave,
             GROUP_MSG: self.handle_group_msg,
             HISTORY: self.handle_history,
+            FILE: self.handle_file,
             SUMMARIZE: self.handle_summarize,
             TRANSLATE: self.handle_translate,
             BOT_ASK: self.handle_bot_ask,
@@ -353,6 +360,53 @@ class ChatServer:
             for member in info["members"]:
                 if member in self.clients:      # members who are offline right now miss it
                     self.send(self.clients[member], out)
+
+    def handle_file(self, name, msg):
+        """Special 2: deliver a file or image to a room, with the same privacy as text (R7, R11).
+
+        The bytes travel inside the JSON frame as base64 text (binary can't be put in JSON). The
+        server checks everything itself and never trusts the client's "size" or path in "filename":
+        it decodes the data, measures it, and cleans the name before anyone else sees it.
+        """
+        room, data = msg.get("room"), msg.get("data")
+        with self.lock:
+            me = self.clients[name]
+            # Same room check as HISTORY: a DM only for its two people, a group only for its members.
+            if self.visible_since(me, name, room, request=FILE) is None:
+                return                          # an ERROR was already sent
+            filename = clean_filename(msg.get("filename"))
+            if filename is None:
+                return self.send_error(me, BAD_REQUEST, "filename must be 1-100 characters", request=FILE)
+            if not isinstance(data, str):
+                return self.send_error(me, BAD_REQUEST, "data must be base64 text", request=FILE)
+            if len(data) > MAX_FILE_BYTES * 4 // 3 + 4:     # base64 is 4/3 the size of the bytes: check before decoding
+                return self.send_error(me, TOO_LARGE, f"file is over {MAX_FILE_BYTES // 1024 // 1024} MiB", request=FILE)
+            try:
+                raw = base64.b64decode(data, validate=True)
+            except (binascii.Error, ValueError):
+                return self.send_error(me, BAD_REQUEST, "data is not valid base64", request=FILE)
+            if not raw:
+                return self.send_error(me, BAD_REQUEST, "the file is empty", request=FILE)
+            if len(raw) > MAX_FILE_BYTES:
+                return self.send_error(me, TOO_LARGE, f"file is over {MAX_FILE_BYTES // 1024 // 1024} MiB", request=FILE)
+
+            if room.startswith("dm:"):
+                partner = next((n for n in room.removeprefix("dm:").split("|") if n != name), name)
+                if partner == name:
+                    return self.send_error(me, BAD_REQUEST, "you cannot send a file to yourself", request=FILE)
+                if partner not in self.clients:
+                    return self.send_error(me, NO_SUCH_USER, f"{partner!r} is not online", request=FILE)
+                receivers = [self.clients[partner]]
+            else:
+                members = self.groups[room.removeprefix("group:")]["members"]
+                receivers = [self.clients[m] for m in members if m in self.clients and m != name]
+            out = {"type": FILE, "room": room, "from": name, "filename": filename, "size": len(raw),
+                   "data": data, "ts": self.buffer.next_ts(room)}
+            self.buffer.add(out)
+            self.send(me, out)                  # echo, so the sender's window shows it too
+            for sock in receivers:
+                self.send(sock, out)
+            log.info("%s sent %s (%d bytes) to %s", name, filename, len(raw), room)
 
     def handle_history(self, name, msg):
         """Special 3: send a room's past messages back to the requester only.

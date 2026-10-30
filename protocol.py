@@ -20,6 +20,8 @@ import struct
 HEADER = struct.Struct("!I")    # "!" = network byte order (big-endian), "I" = 4-byte unsigned int
 MAX_FRAME = 10 * 1024 * 1024    # 10 MiB: refuse bigger frames so a bad peer can't make us allocate huge buffers
 MAX_NAME_LEN = 20               # max length of a user name or group name
+MAX_FILE_BYTES = 5 * 1024 * 1024    # 5 MiB of raw file data; base64 makes it ~6.7 MB, still under MAX_FRAME
+MAX_FILENAME_LEN = 100          # max length of a file name
 
 # ---------------------------------------------------------------------------
 # Message types (the "type" field of every JSON object)
@@ -33,6 +35,8 @@ GROUP_JOIN = "GROUP_JOIN"       # {"group"}                adds the sender only 
 GROUP_LEAVE = "GROUP_LEAVE"     # {"group"}
 GROUP_MSG = "GROUP_MSG"         # {"group", "text"}        members only (R11)
 HISTORY = "HISTORY"             # {"room"} -> {"room", "messages"}   past messages you may read (special 3)
+FILE = "FILE"                   # {"room", "filename", "size", "data"}   send a file or image (special 2); the server
+                                # sends the same type back to the room: {"room", "from", "filename", "size", "data", "ts"}
 SUMMARIZE = "SUMMARIZE"         # {"room"}                 AI summary of a room you can see (special 1)
 TRANSLATE = "TRANSLATE"         # {"room", "ts", "to"}     AI translation of one message you can read
 BOT_ASK = "BOT_ASK"             # {"text", "room"?}        ask the chatbot; "room" adds that room's recent chat as context
@@ -142,6 +146,20 @@ def clean_name(raw):
         return None
     name = raw.strip()
     if not 1 <= len(name) <= MAX_NAME_LEN or "|" in name:
+        return None
+    return name
+
+
+def clean_filename(raw):
+    """Return just the file name (no folders) if it is valid, else None.
+
+    A client could send "..\\..\\evil.exe" or "/etc/passwd". Keeping only what follows the last
+    "/" or "\\" means a receiver who saves the file under this name never gets a path out of it.
+    """
+    if not isinstance(raw, str):
+        return None
+    name = raw.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if not 1 <= len(name) <= MAX_FILENAME_LEN or name in (".", ".."):
         return None
     return name
 

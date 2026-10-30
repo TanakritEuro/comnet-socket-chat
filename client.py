@@ -13,22 +13,26 @@ thread sending while another is blocked in recv() on the same socket is safe.
 """
 
 import argparse
+import base64
+import os
 import queue
 import socket
 import threading
 import time
 import tkinter as tk
-from tkinter import font as tkfont, messagebox, scrolledtext, simpledialog, ttk
+from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 
 from protocol import (
-    AI_FAILED, BOT_ASK, BOT_CLEAR, BOT_REPLY, BYE, DM, ERROR, GROUP_CREATE, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG,
-    GROUPS, HELLO, HISTORY, MAX_NAME_LEN, MSG, NAME_TAKEN, SUMMARIZE, SUMMARY, TRANSLATE, TRANSLATION, USERS,
-    WELCOME,
+    AI_FAILED, BOT_ASK, BOT_CLEAR, BOT_REPLY, BYE, DM, ERROR, FILE, GROUP_CREATE, GROUP_JOIN, GROUP_LEAVE,
+    GROUP_MSG, GROUPS, HELLO, HISTORY, MAX_FILE_BYTES, MAX_NAME_LEN, MSG, NAME_TAKEN, SUMMARIZE, SUMMARY,
+    TRANSLATE, TRANSLATION, USERS, WELCOME,
     ProtocolError, clean_name, dm_partner, dm_room, group_room, recv_msg, send_msg,
 )
 
 POLL_MS = 50            # how often the GUI thread checks the inbox queue
 CONNECT_TIMEOUT = 5     # seconds to wait for the server while logging in
+IMAGE_TYPES = (".png", ".gif")   # Tk can draw these without extra libraries (no JPEG: that needs Pillow)
+PREVIEW_PX = 320        # an image preview is shrunk until it is at most this wide
 
 # Colours. The whole window uses one light palette (apply_theme), even when the OS is in dark mode, so it
 # looks the same on every machine and the tinted AI blocks stay readable. Violet means "AI feature".
@@ -194,6 +198,7 @@ def make_chat_window(parent):
     window.tag_configure("stamp", foreground=GRAY, font=SMALL)
     window.tag_configure("notice", foreground="gray", font=ITALIC)
     window.tag_configure("note", foreground=GRAY, font=SMALL_ITALIC)
+    window.tag_configure("file_line", foreground=INK, font=BOLD)
     window.tag_configure("divider", foreground="#9AA5B5", font=SMALL, justify="center", spacing1=6, spacing3=2)
     # AI summaries get a tinted, indented block so nobody mistakes them for a chat message.
     window.tag_configure("summary_title", foreground="#613583", background="#f3eefa",
@@ -223,6 +228,15 @@ def make_chat_window(parent):
     return window
 
 
+def format_size(size):
+    """A file size for people: "532 B", "12.3 KB" or "4.8 MB"."""
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / 1024 / 1024:.1f} MB"
+
+
 def append_text(window, text, *tags):
     """Add text at the end of a chat window and scroll to it. `tags` may contain None (ignored)."""
     window.configure(state="normal")
@@ -240,19 +254,24 @@ class RoomTab(ttk.Frame):
     mood_failed and add_summary.
     """
 
-    def __init__(self, parent, on_send, on_summarize, on_translate, on_mood, title="", subtitle=""):
+    def __init__(self, parent, on_send, on_summarize, on_translate, on_mood, title="", subtitle="", on_file=None):
         super().__init__(parent, padding=10, style="White.TFrame")
         self.on_send = on_send              # function(text) -> True if the message was sent
         self.on_summarize = on_summarize    # function() -> True if SUMMARIZE was sent
         self.on_translate = on_translate    # function(ts, language code) -> True if the request was sent
         self.on_mood = on_mood              # function(ts) -> True if the request was sent
+        self.on_file = on_file              # function(path) -> True if the file was sent (special 2)
         self.entries = {}                   # message number -> {"ts": ..., "row": tag of its background}
         self.by_ts = {}                     # message ts -> message number
+        self.files = {}                     # message number -> (file name, base64 data) of a file we can save
+        self.images = []                    # previews on screen: Tk draws an image only while Python holds it
 
         # Chat box: Enter or the Send button sends. Packed first (at the bottom) so it
         # never gets squeezed out when the window is small.
         bar = ttk.Frame(self, style="White.TFrame")
         bar.pack(side="bottom", fill="x", pady=(8, 0))
+        if on_file is not None:
+            ttk.Button(bar, text="📎 Attach", command=self.attach).pack(side="left", padx=(0, 8))
         self.entry = ttk.Entry(bar)
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Return>", lambda event: self.send())
@@ -281,6 +300,13 @@ class RoomTab(ttk.Frame):
         self.window.pack(fill="both", expand=True)
         self.window.tag_bind("link", "<Button-1>", self.on_link_click)
         self.window.tag_bind("mood_button", "<Button-1>", self.on_mood_click)
+        self.window.tag_bind("file_save", "<Button-1>", self.on_save_click)
+
+    def attach(self):
+        """The 📎 button: pick a file or image and send it (special 2)."""
+        path = filedialog.askopenfilename(parent=self, title="Send a file or image")
+        if path:
+            self.on_file(path)
 
     def send(self):
         """Hand the typed text to on_send. It appears in the window when the server echoes it back."""
@@ -316,6 +342,62 @@ class RoomTab(ttk.Frame):
         if not mine:
             self.insert_slot("end", number, "tr", [("Translate", ("link",)), ("\n", ())])
         self.window.see("end")
+
+    def add_file(self, sender, filename, size, data, ts, mine):
+        """Special 2: append a file message: a header, a preview for PNG/GIF images, then the file's name,
+        size and a "Save as…" link. `data` is the base64 text, or None when the server no longer has the
+        bytes (a big file shown from history)."""
+        number = len(self.entries)
+        row = "row_me" if mine else None
+        self.entries[number] = {"ts": ts, "row": row}
+        self.by_ts[ts] = number
+        stamp = time.strftime("%H:%M", time.localtime(ts))
+        self.append(sender, row, "header", "me" if mine else "other")
+        self.append(f"  {stamp}\n", row, "stamp")
+        if data is not None and filename.lower().endswith(IMAGE_TYPES):
+            self.add_preview(data, row)
+        self.append(f"📎 {filename}", row, "file_line")
+        self.append(f"  ·  {format_size(size)}", row, "stamp")
+        if data is None:
+            self.append("  ·  too big to keep in history\n", row, "note")
+        else:
+            self.files[number] = (filename, data)
+            self.append("  ·  ", row, "stamp")
+            self.insert_slot("end", number, "save", [("Save as…", ("link", "file_save"))])
+            self.append("\n", row)
+        self.window.see("end")
+
+    def add_preview(self, data, row):
+        """Draw an image inside the chat window, shrunk to fit. If Tk can't read it, show nothing here
+        (the file still appears below as a normal file with a Save link)."""
+        try:
+            image = tk.PhotoImage(data=data)            # Tk decodes the base64 PNG/GIF itself
+            shrink = -(-max(image.width(), image.height()) // PREVIEW_PX)    # whole-number divisor, rounded up
+            if shrink > 1:
+                image = image.subsample(shrink)
+        except tk.TclError:
+            return
+        self.images.append(image)                       # keep a reference, or Tk would erase the picture
+        self.window.configure(state="normal")
+        self.window.image_create("end", image=image, padx=4, pady=4)
+        self.window.insert("end", "\n", row)
+        self.window.configure(state="disabled")
+
+    def on_save_click(self, event):
+        number = self.by_ts.get(self.slot_at(event, "save"))
+        if number in self.files:
+            self.save_file(*self.files[number])
+
+    def save_file(self, filename, data):
+        """Ask where to save, then write the decoded bytes there."""
+        path = filedialog.asksaveasfilename(parent=self, title="Save file", initialfile=filename)
+        if not path:
+            return                                      # cancelled
+        try:
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(data))
+        except OSError as e:
+            messagebox.showerror("Cannot save", str(e), parent=self)
 
     def insert_slot(self, index, number, kind, parts):
         """Insert `parts` (pairs of text and tag tuples) tagged as slot `kind` of message `number`.
@@ -560,7 +642,7 @@ class ChatApp:
         self.groups = {}                    # group name -> {"creator": ..., "members": [...]}
         self.waiting = {}                   # room id -> live messages that arrived before its HISTORY (special 3)
         self.unread = {}                    # room id -> number of unread messages from other people (special 3)
-        self.handlers = {USERS: self.on_users, GROUPS: self.on_groups, MSG: self.on_msg,
+        self.handlers = {USERS: self.on_users, GROUPS: self.on_groups, MSG: self.on_msg, FILE: self.on_msg,
                          SUMMARY: self.on_summary, TRANSLATION: self.on_translation, BOT_REPLY: self.on_bot_reply,
                          ERROR: self.on_error, HISTORY: self.on_history}
 
@@ -803,7 +885,8 @@ class ChatApp:
                 on_summarize=lambda: self.send(SUMMARIZE, room=room),
                 on_translate=lambda ts, to: self.translate_message(room, ts, to),
                 on_mood=lambda ts: self.analyze_mood(room, ts),
-                title=title, subtitle=subtitle)
+                title=title, subtitle=subtitle,
+                on_file=lambda path: self.send_file(room, path))
             self.notebook.add(self.rooms[room], text=title)
             self.request_history(room)
         if select:
@@ -889,7 +972,34 @@ class ChatApp:
                 self.show_message(tab, m)
 
     def show_message(self, tab, msg):
-        tab.add_message(msg["from"], msg["text"], msg["ts"], mine=msg["from"] == self.me)
+        """Draw one stored or live message, which is either a chat message (MSG) or a file (FILE)."""
+        mine = msg["from"] == self.me
+        if msg.get("type") == FILE:
+            tab.add_file(msg["from"], msg["filename"], msg["size"], msg["data"], msg["ts"], mine)
+        else:
+            tab.add_message(msg["from"], msg["text"], msg["ts"], mine)
+
+    def send_file(self, room, path):
+        """Special 2: read a file from disk and send it to a room. Returns True if it was sent.
+
+        The server only accepts text in JSON, so the bytes go as base64. The size limit is checked here
+        too, so a file that is too big never leaves this computer (the server checks it again)."""
+        try:
+            size = os.path.getsize(path)
+            if size == 0:
+                messagebox.showinfo("Empty file", "That file is empty, so there is nothing to send.", parent=self.root)
+                return False
+            if size > MAX_FILE_BYTES:
+                messagebox.showerror("File too large", f"{os.path.basename(path)} is {format_size(size)}. "
+                                     f"The limit is {format_size(MAX_FILE_BYTES)}.", parent=self.root)
+                return False
+            with open(path, "rb") as f:
+                raw = f.read()
+        except OSError as e:
+            messagebox.showerror("Cannot read file", str(e), parent=self.root)
+            return False
+        data = base64.b64encode(raw).decode("ascii")
+        return self.send(FILE, room=room, filename=os.path.basename(path), size=size, data=data)
 
     def is_viewing(self, room):
         """True if this room's tab is the one on screen right now."""

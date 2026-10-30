@@ -13,10 +13,13 @@ Rerun it after every feature PR. Exit code 0 means every check passed.
 import argparse
 import os
 import socket
+import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # so "import client" works from any folder
@@ -27,7 +30,7 @@ import ai
 import ai_bot
 import ai_translate
 import client
-from protocol import DM, HELLO, MSG, SUMMARY, TRANSLATION, recv_msg, send_msg
+from protocol import DM, FILE, HELLO, MSG, SUMMARY, TRANSLATION, recv_msg, send_msg
 from server import ChatServer
 
 TIMEOUT = 3.0           # seconds to wait for the GUI to show something
@@ -84,6 +87,18 @@ def raw_messages(sock, quiet_time=0.3):
 
 def text_of(tab):
     return tab.window.get("1.0", "end")
+
+
+def make_png(width, height):
+    """The bytes of a plain grey PNG, built by hand so the check needs no image library."""
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+    row = b"\x00" + b"\x80\x80\x80" * width             # filter byte 0, then width RGB pixels
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(row * height))
+            + chunk(b"IEND", b""))
 
 
 def offline_summarizer(room, messages):
@@ -338,6 +353,47 @@ def main():
     check("S3  new messages go below the divider",
           wait_until(root, lambda: "new after reopen" in text_of(reopened))
           and text_of(reopened).index("earlier messages") < text_of(reopened).index("new after reopen"))
+
+    # Special 2: files and images. send_file is what the 📎 button calls after the file dialog.
+    with tempfile.TemporaryDirectory() as folder:
+        notes = Path(folder) / "notes.txt"
+        notes.write_bytes(b"line one\nline two\n")
+        check("S2  alice sends a text file", alice.send_file("dm:alice|bob", str(notes)))
+        check("S2  it appears in alice's own tab (echo)",
+              wait_until(root, lambda: "notes.txt" in text_of(reopened) and "Save as…" in text_of(reopened)))
+        check("S2  it appears in bob's tab with its size",
+              wait_until(root, lambda: "notes.txt" in text_of(bob_dm) and "18 B" in text_of(bob_dm)))
+        check("S2  carol received no file", not any(m["type"] == FILE for m in raw_messages(carol)))
+
+        saved = Path(folder) / "saved.txt"
+        client.filedialog.asksaveasfilename = lambda **kwargs: str(saved)     # answer the Save dialog in code
+        bob_dm.save_file(*bob_dm.files[max(bob_dm.files)])
+        check("S2  Save as… writes the same bytes", saved.read_bytes() == b"line one\nline two\n")
+
+        picture = Path(folder) / "picture.png"
+        picture.write_bytes(make_png(400, 400))
+        check("S2  bob sends a PNG image", bob.send_file("dm:alice|bob", str(picture)))
+        check("S2  alice's tab shows a preview image",
+              wait_until(root, lambda: len(reopened.images) == 1 and reopened.window.image_names()))
+        check("S2  the preview is shrunk to fit", reopened.images[0].width() <= client.PREVIEW_PX)
+
+        before = len(popups)
+        big = Path(folder) / "big.bin"
+        big.write_bytes(b"\0" * (client.MAX_FILE_BYTES + 1))
+        check("S2  a file over 5 MiB is refused on the client", not alice.send_file("dm:alice|bob", str(big)))
+        check("S2  ... with a 'File too large' message", any(p[1] == "File too large" for p in popups[before:]))
+        check("S2  ... and nothing was sent", "big.bin" not in text_of(reopened) and "big.bin" not in text_of(bob_dm))
+
+        # History: the file comes back when alice reopens the tab, still with its Save link.
+        alice.close_room("dm:alice|bob")
+        alice.user_list.selection_clear(0, "end")
+        alice.user_list.selection_set(alice.users.index("bob"))
+        alice.on_user_double_click(None)
+        again = alice.rooms["dm:alice|bob"]
+        check("S2  files come back from history with a Save link",
+              wait_until(root, lambda: "notes.txt" in text_of(again) and "picture.png" in text_of(again)
+                         and text_of(again).count("Save as…") == 2))
+        check("S2  an image from history shows its preview again", wait_until(root, lambda: len(again.images) == 1))
 
     if args.screenshot:
         alice.notebook.select(group_tab)
