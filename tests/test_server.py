@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # so "import s
 
 import ai
 import ai_bot
+import ai_sentiment
 import ai_translate
 from protocol import (
     AI_FAILED, ALREADY_MEMBER, BAD_NAME, BAD_REQUEST, BOT_ASK, BOT_CLEAR, BOT_REPLY, BUSY, DM, ERROR,
@@ -104,18 +105,21 @@ def offline_translator(text, to):
     """Default for test servers: never read the real .env key, never call the real API (so: no translation)."""
     return ai_translate.translate(text, to, ai.Config(api_key="", models=[]))
 
-
+def offline_analyzer(text):
+    """Default for test servers: never read the real .env key, never call the real API (so: the word-list guess)."""
+    return ai_sentiment.analyze(text, ai.Config(api_key="", models=[]))
 class ServerTestCase(unittest.TestCase):
     """Starts a fresh server on a free port before each test."""
 
     summarizer = staticmethod(offline_summarizer)
     bot = staticmethod(offline_bot)
     translator = staticmethod(offline_translator)
+    analyzer = staticmethod(offline_analyzer)
 
     def setUp(self):
         # port 0: the OS picks a free port
         self.server = ChatServer("127.0.0.1", 0, summarizer=self.summarizer, bot=self.bot,
-                                 translator=self.translator)
+                                 translator=self.translator, analyzer=self.analyzer)
         self.port = self.server.start()
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.clients = []
