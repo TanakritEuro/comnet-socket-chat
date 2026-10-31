@@ -309,7 +309,8 @@ class ChatServer:
             if group in self.groups:
                 return self.send_error(me, GROUP_EXISTS, f"group {group!r} already exists")
             # Nobody else is added. "joined" lets summaries (and later HISTORY) skip older messages.
-            self.groups[group] = {"creator": name, "members": [name], "joined": {name: time.time()}}
+            self.groups[group] = {"creator": name, "members": [name],
+                                  "joined": {name: self.buffer.next_ts(f"group:{group}")}}
             self.broadcast_groups()
 
     def handle_group_join(self, name, msg):
@@ -324,7 +325,10 @@ class ChatServer:
             if name in info["members"]:
                 return self.send_error(me, ALREADY_MEMBER, f"you are already in {group!r}")
             info["members"].append(name)
-            info["joined"][name] = time.time()
+            # Not time.time(): on Windows it ticks only every ~15 ms, so a message sent just before the join
+            # could get the same time and count as "after you joined". next_ts() is strictly after the
+            # room's newest message.
+            info["joined"][name] = self.buffer.next_ts(f"group:{group}")
             self.broadcast_groups()
 
     def handle_group_leave(self, name, msg):
