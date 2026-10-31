@@ -25,7 +25,7 @@ from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, simple
 from protocol import (
     AI_FAILED, BOT_ASK, BOT_CLEAR, BOT_REPLY, BYE, DM, ERROR, FILE, GROUP_CREATE, GROUP_JOIN, GROUP_LEAVE,
     GROUP_MSG, GROUPS, HELLO, HISTORY, MAX_FILE_BYTES, MAX_NAME_LEN, MSG, NAME_TAKEN, SUMMARIZE, SUMMARY,
-    TRANSLATE, TRANSLATION, USERS, WELCOME,
+    TRANSLATE, TRANSLATION, USERS, WELCOME,SENTIMENT, SENTIMENT_RESULT,
     ProtocolError, clean_name, dm_partner, dm_room, group_room, recv_msg, send_msg,
 )
 
@@ -472,10 +472,11 @@ class RoomTab(ttk.Frame):
     def show_mood_pending(self, ts):
         self.replace_slot(ts, "mood", [("Analyzing…", ("mood_pending",))])
 
-    def set_mood(self, ts, label):
-        """Replace the button with a pill. `label` is "positive", "neutral" or "negative"."""
+    def set_mood(self, ts, label, model=None):
+        """Replace the button with a pill. model "offline" = guessed from a word list, so the pill says so."""
         if label in MOODS:
-            self.replace_slot(ts, "mood", [(f" ● {MOODS[label][0]} ", (f"mood_{label}",))])
+            offline = " · offline" if model == "offline" else ""
+            self.replace_slot(ts, "mood", [(f" ● {MOODS[label][0]}{offline} ", (f"mood_{label}",))])
 
     def mood_failed(self, ts):
         self.replace_slot(ts, "mood", [("✦ Couldn't analyze · Try again", ("mood_button", "mood_error"))])
@@ -643,7 +644,7 @@ class ChatApp:
         self.waiting = {}                   # room id -> live messages that arrived before its HISTORY (special 3)
         self.unread = {}                    # room id -> number of unread messages from other people (special 3)
         self.handlers = {USERS: self.on_users, GROUPS: self.on_groups, MSG: self.on_msg, FILE: self.on_msg,
-                         SUMMARY: self.on_summary, TRANSLATION: self.on_translation, BOT_REPLY: self.on_bot_reply,
+                         SUMMARY: self.on_summary, TRANSLATION: self.on_translation,SENTIMENT_RESULT: self.on_sentiment, BOT_REPLY: self.on_bot_reply,
                          ERROR: self.on_error, HISTORY: self.on_history}
 
         self.build_widgets()
@@ -838,7 +839,11 @@ class ChatApp:
         tab = self.rooms.get(msg["room"])
         if tab is not None:                 # the tab may have closed meanwhile
             tab.add_translation(msg["ts"], msg["text"], msg["source"], msg["to"])
-
+    def on_sentiment(self, msg):
+        """Sentiment: the server's answer, sent only to us. Replaces "Analyzing…" with a mood pill."""
+        tab = self.rooms.get(msg["room"])
+        if tab is not None:
+            tab.set_mood(msg["ts"], msg["label"], msg.get("model"))
     def on_bot_reply(self, msg):
         """Special 4: the chatbot's answer, sent only to us. Replaces "Thinking…" in the assistant tab."""
         if self.bot_tab is not None:
@@ -851,6 +856,11 @@ class ChatApp:
             if tab is not None:
                 # A temporary failure just offers "Try again"; for any other refusal say why.
                 tab.translation_failed(msg.get("ts"), None if msg.get("code") == AI_FAILED else msg.get("message"))
+            return
+        if msg.get("request") == SENTIMENT:     # a mood analysis failed: the button comes back
+            tab = self.rooms.get(msg.get("room"))
+            if tab is not None:
+                tab.mood_failed(msg.get("ts"))
             return
         if msg.get("request") == HISTORY:   # a history couldn't load: just show the live messages we held back
             for room in list(self.waiting):
@@ -1049,9 +1059,8 @@ class ChatApp:
         return self.send(TRANSLATE, room=room, ts=ts, to=to)
 
     def analyze_mood(self, room, ts):
-        """Sentiment: the Analyze mood button on the message `ts` of `room` was clicked."""
-        self.rooms[room].add_notice("Mood analysis isn't available yet.")
-        return False
+        """Sentiment: send only the message's id; the server reads the text itself."""
+        return self.send(SENTIMENT, room=room, ts=ts)
 
     def ask_bot(self, text, use_last_chat):
         """Chatbot: a question was typed. With use_last_chat, self.last_room is the room it is about."""

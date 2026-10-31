@@ -24,6 +24,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger("ai")
+import socket
+
+_original_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_first(host, port, family=0, *args, **kwargs):
+    """Put IPv4 addresses before IPv6 ones. Some networks announce IPv6 but can't route it, and then
+    every IPv6 attempt waits for the full timeout (8 Google addresses x 15 s = 2 minutes) before IPv4 is
+    tried. IPv6 is still used if there is no IPv4 address."""
+    results = _original_getaddrinfo(host, port, family, *args, **kwargs)
+    return sorted(results, key=lambda r: r[0] != socket.AF_INET)
+
+
+socket.getaddrinfo = _ipv4_first
 
 ENV_FILE = Path(__file__).resolve().parent / ".env"
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"

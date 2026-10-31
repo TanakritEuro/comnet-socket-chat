@@ -20,11 +20,12 @@ from collections import OrderedDict, defaultdict, deque
 import ai
 import ai_bot
 import ai_translate
+import ai_sentiment
 from protocol import (
     AI_FAILED, ALREADY_MEMBER, BAD_NAME, BAD_REQUEST, BOT_ASK, BOT_CLEAR, BOT_REPLY, BUSY, BYE,
     DM, ERROR, FILE, GROUP_CREATE, GROUP_EXISTS, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO, HISTORY,
     MAX_FILE_BYTES, MAX_NAME_LEN, MSG, NAME_TAKEN, NO_SUCH_GROUP, NO_SUCH_MESSAGE, NO_SUCH_USER, NOT_MEMBER,
-    SUMMARIZE, SUMMARY, TOO_LARGE, TRANSLATE, TRANSLATION, USERS, WELCOME,
+    SENTIMENT, SENTIMENT_RESULT, SUMMARIZE, SUMMARY, TOO_LARGE, TRANSLATE, TRANSLATION, USERS, WELCOME,
     ProtocolError, clean_filename, clean_name, dm_room, group_room, recv_msg, send_msg,
 )
 
@@ -37,7 +38,8 @@ HISTORY_MAX_BYTES = 1024 * 1024   # one HISTORY reply stays far below the 10 MiB
 HISTORY_FILE_MAX = 256 * 1024     # files bigger than this are not kept in history (200 x 5 MiB would fill the RAM)
 TRANSLATING_MAX = 3     # translations one user may have in progress at once (protects the tiny API quota)
 TRANSLATION_CACHE = 200  # finished translations kept, so the same click again costs no API call
-
+ANALYZING_MAX = 3       # mood analyses one user may have in progress at once (protects the tiny API quota)
+MOOD_CACHE = 500        # AI moods kept, so the same message clicked again (by anyone) costs no API call
 
 class MessageBuffer:
     """The last BUFFER_SIZE chat messages of every room, in memory only (lost on restart).
@@ -91,7 +93,7 @@ class ChatServer:
     """
 
     def __init__(self, host="0.0.0.0", port=5050, summarizer=ai.summarize, bot=ai_bot.ask,
-                 translator=ai_translate.translate):
+                 translator=ai_translate.translate, analyzer=ai_sentiment.analyze):
         self.host = host
         self.port = port
         self.lock = threading.Lock()
@@ -107,6 +109,9 @@ class ChatServer:
         self.translator = translator    # function(text, to) -> (translation, source, model); tests swap in a fake
         self.translating = set()        # (name, room, ts) of translations in progress
         self.translations = OrderedDict()   # (room, ts, to) -> (translation, source, model), oldest first
+        self.analyzer = analyzer        # function(text) -> (label, model); tests swap in a fake
+        self.analyzing = set()          # (name, room, ts) of mood analyses in progress
+        self.moods = OrderedDict()      # (room, ts) -> (label, model) from the AI, oldest first
         self.listen_sock = None
         self.running = False
         # Which method handles which message type (after login).
@@ -120,6 +125,7 @@ class ChatServer:
             FILE: self.handle_file,
             SUMMARIZE: self.handle_summarize,
             TRANSLATE: self.handle_translate,
+            SENTIMENT: self.handle_sentiment,
             BOT_ASK: self.handle_bot_ask,
             BOT_CLEAR: self.handle_bot_clear,
         }
@@ -530,7 +536,61 @@ class ChatServer:
     def translation_message(room, ts, to, text, source, model):
         """The TRANSLATION reply. `room` + `ts` name the original message, so the client shows it under that message."""
         return {"type": TRANSLATION, "room": room, "ts": ts, "to": to, "source": source, "text": text, "model": model}
+    def handle_sentiment(self, name, msg):
+        """AI mood of ONE message, sent back to the requester only. Same checks as TRANSLATE."""
+        room, ts = msg.get("room"), msg.get("ts")
+        about = {"request": SENTIMENT, "room": room, "ts": ts}
+        with self.lock:
+            me = self.clients[name]
+            since = self.visible_since(me, name, room, **about)
+            if since is None:
+                return                          # an ERROR was already sent
+            if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+                return self.send_error(me, BAD_REQUEST, "ts must be a message timestamp", **about)
+            original = self.buffer.find(room, ts)
+            if original is None or original["ts"] < since:      # unknown, too old, or sent before you joined
+                return self.send_error(me, NO_SUCH_MESSAGE, "that message is not available to analyze", **about)
+            text = original.get("text")
+            if not isinstance(text, str) or not text.strip():   # e.g. a file
+                return self.send_error(me, BAD_REQUEST, "that message has no text to analyze", **about)
+            if len(text) > ai_sentiment.MAX_CHARS:
+                return self.send_error(me, BAD_REQUEST, f"that message is over {ai_sentiment.MAX_CHARS} characters", **about)
 
+            cached = self.moods.get((room, ts))
+            if cached is not None:              # analyzed before: no API call
+                self.moods.move_to_end((room, ts))
+                return self.send(me, self.sentiment_message(room, ts, *cached))
+            if (name, room, ts) in self.analyzing:
+                return self.send_error(me, BUSY, "that message is already being analyzed", **about)
+            if sum(1 for who, _, _ in self.analyzing if who == name) >= ANALYZING_MAX:
+                return self.send_error(me, BUSY, "wait for your other mood analyses to finish", **about)
+            self.analyzing.add((name, room, ts))
+        threading.Thread(target=self.sentiment_worker, args=(name, me, room, ts, text), daemon=True).start()
+
+    def sentiment_worker(self, name, sock, room, ts, text):
+        """Worker thread: ask the AI (slow, no lock held), then reply to the requester only."""
+        result = None
+        try:
+            result = self.analyzer(text)
+        except Exception:                       # a bug must not leave the user on "Analyzing…"
+            log.exception("analyzer crashed")
+        with self.lock:
+            self.analyzing.discard((name, room, ts))
+            if result is not None and result[1] != ai.OFFLINE:   # cache AI answers only
+                self.moods[(room, ts)] = result
+                while len(self.moods) > MOOD_CACHE:
+                    self.moods.popitem(last=False)
+            if self.clients.get(name) is not sock:
+                return                          # the requester left
+            if result is None:
+                return self.send_error(sock, AI_FAILED, "the mood couldn't be analyzed right now, try again",
+                                       request=SENTIMENT, room=room, ts=ts)
+            self.send(sock, self.sentiment_message(room, ts, *result))
+        log.info("mood for %s in %s: %s, model %s", name, room, result[0], result[1])
+
+    @staticmethod
+    def sentiment_message(room, ts, label, model):
+        return {"type": SENTIMENT_RESULT, "room": room, "ts": ts, "label": label, "model": model}    
     def handle_bot_ask(self, name, msg):
         """Special 4: ask the chatbot. The answer goes back to the asker only.
 
