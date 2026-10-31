@@ -68,7 +68,10 @@ class Special2FileTests(ServerTestCase):
     def test_group_file_reaches_members_only(self):
         self.create_group(self.alice, "netlab")
         self.bob.send("GROUP_JOIN", group="netlab")
-        self.bob.wait_for("GROUPS")
+        # Wait for the GROUPS that lists bob as a member. A bare wait_for("GROUPS") can return the older
+        # "group created" broadcast, and then alice's file may reach the server before bob's join.
+        while not any(g["name"] == "netlab" and "bob" in g["members"] for g in self.bob.wait_for("GROUPS")["groups"]):
+            pass
         self.send_file(self.alice, "group:netlab", b"for the group")
         self.assertEqual(self.alice.wait_for(FILE)["room"], "group:netlab")
         self.assertEqual(self.bob.wait_for(FILE)["from"], "alice")
@@ -115,6 +118,9 @@ class Special2FileTests(ServerTestCase):
         self.bob.assert_no(FILE)
         # The connection stays open and a file of exactly 5 MiB still goes through.
         self.send_file(self.alice, "dm:alice|bob", b"y" * MAX_FILE_BYTES, "max.bin")
+        # Read alice's echo first: the server sends to alice, then to bob, and a 7 MB frame doesn't fit in
+        # the socket buffer, so the server waits until alice reads it (see the ChatServer docstring).
+        self.assertEqual(self.alice.wait_for(FILE)["size"], MAX_FILE_BYTES)
         self.assertEqual(self.bob.wait_for(FILE)["size"], MAX_FILE_BYTES)
 
     def test_small_file_is_kept_in_history_with_its_bytes(self):
