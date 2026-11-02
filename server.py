@@ -36,7 +36,6 @@ NAME_RULES = f"must be 1-{MAX_NAME_LEN} characters and must not contain '|'"
 BUFFER_SIZE = 200       # messages kept per room (chat history, special 3)
 AI_CONTEXT = 50         # newest messages handed to the AI, so a long history doesn't cost more tokens
 HISTORY_MAX_BYTES = 1024 * 1024   # one HISTORY reply stays far below the 10 MiB frame limit
-HISTORY_FILE_MAX = 256 * 1024     # files bigger than this are not kept in history (200 x 5 MiB would fill the RAM)
 MAX_QUEUED_BYTES = 32 * 1024 * 1024   # a client this far behind in reading is disconnected (bounds the server's RAM)
 TRANSLATING_MAX = 3     # translations one user may have in progress at once (protects the tiny API quota)
 TRANSLATION_CACHE = 200  # finished translations kept, so the same click again costs no API call
@@ -47,8 +46,8 @@ class MessageBuffer:
     """The last BUFFER_SIZE chat messages of every room, in memory only (lost on restart).
 
     Stores the exact MSG dicts that were delivered, so HISTORY sends them back unchanged and a
-    message keeps its id (room + ts). AI summaries and the chatbot read the newest AI_CONTEXT
-    of them. Caller must hold ChatServer.lock.
+    message keeps its id (room + ts). A FILE is stored without its bytes (see add). AI summaries and
+    the chatbot read the newest AI_CONTEXT of them. Caller must hold ChatServer.lock.
     """
 
     def __init__(self, size=BUFFER_SIZE):
@@ -56,9 +55,12 @@ class MessageBuffer:
         self.rooms = defaultdict(lambda: deque(maxlen=size))
 
     def add(self, msg):
-        if msg["type"] == FILE and msg["size"] > HISTORY_FILE_MAX:
-            # Keep the name and size so history still shows that the file was sent, but drop the bytes.
-            msg = {**msg, "data": None}
+        if msg["type"] == FILE:
+            # Files are kept as metadata only (from, filename, size, ts, room): 200 files of 5 MiB per room
+            # would fill the server's RAM. Live delivery already carried the bytes; history only shows
+            # that the file was sent. Without "data", no file bytes can reach the AI either.
+            msg = {key: value for key, value in msg.items() if key != "data"}
+            msg["data_omitted"] = True
         self.rooms[msg["room"]].append(msg)
 
     def recent(self, room, since=0.0, limit=AI_CONTEXT):
@@ -492,7 +494,7 @@ class ChatServer:
                 receivers = [self.clients[m] for m in members if m in self.clients and m != name]
             out = {"type": FILE, "room": room, "from": name, "filename": filename, "size": len(raw),
                    "data": data, "ts": self.buffer.next_ts(room)}
-            self.buffer.add(out)
+            self.buffer.add(out)                # stored without its bytes (see MessageBuffer.add)
             self.deliver(out, [me, *receivers])     # echo to the sender too, so its window shows the file
             log.info("%s sent %s (%d bytes) to %s", name, filename, len(raw), room)
 

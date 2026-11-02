@@ -412,16 +412,17 @@ def main():
         check("S2  ... with a 'File too large' message", any(p[1] == "File too large" for p in popups[before:]))
         check("S2  ... and nothing was sent", "big.bin" not in text_of(reopened) and "big.bin" not in text_of(bob_dm))
 
-        # History: the file comes back when alice reopens the tab, still with its Save link.
+        # History: the server keeps files as metadata only, so reopening the tab shows name and size, no bytes.
         alice.close_room("dm:alice|bob")
         alice.user_list.selection_clear(0, "end")
         alice.user_list.selection_set(alice.users.index("bob"))
         alice.on_user_double_click(None)
         again = alice.rooms["dm:alice|bob"]
-        check("S2  files come back from history with a Save link",
-              wait_until(root, lambda: "notes.txt" in text_of(again) and "picture.png" in text_of(again)
-                         and text_of(again).count("Save as…") == 2))
-        check("S2  an image from history shows its preview again", wait_until(root, lambda: len(again.images) == 1))
+        check("S2  files come back from history as name and size only",
+              wait_until(root, lambda: "📎 notes.txt (18 B) — sent earlier, not stored on the server" in text_of(again)
+                         and "📎 picture.png (" in text_of(again)))
+        check("S2  ... with no Save link and no preview (the server didn't keep the bytes)",
+              "Save as…" not in text_of(again) and not again.images and not again.files)
 
     if args.screenshot:
         alice.notebook.select(group_tab)

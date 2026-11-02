@@ -345,8 +345,8 @@ class RoomTab(ttk.Frame):
 
     def add_file(self, sender, filename, size, data, ts, mine):
         """Special 2: append a file message: a header, a preview for PNG/GIF images, then the file's name,
-        size and a "Save as…" link. `data` is the base64 text, or None when the server no longer has the
-        bytes (a big file shown from history)."""
+        size and a "Save as…" link. `data` is the base64 text, or None for a file shown from history: the
+        server keeps files there as metadata only (name, size, sender, time), never their bytes."""
         number = len(self.entries)
         row = "row_me" if mine else None
         self.entries[number] = {"ts": ts, "row": row}
@@ -354,17 +354,19 @@ class RoomTab(ttk.Frame):
         stamp = time.strftime("%H:%M", time.localtime(ts))
         self.append(sender, row, "header", "me" if mine else "other")
         self.append(f"  {stamp}\n", row, "stamp")
-        if data is not None and filename.lower().endswith(IMAGE_TYPES):
+        if data is None:                    # from history: no bytes, so no preview and no Save link
+            self.append(f"📎 {filename} ({format_size(size)})", row, "file_line")
+            self.append(" — sent earlier, not stored on the server\n", row, "note")
+            self.window.see("end")
+            return
+        if filename.lower().endswith(IMAGE_TYPES):
             self.add_preview(data, row)
         self.append(f"📎 {filename}", row, "file_line")
         self.append(f"  ·  {format_size(size)}", row, "stamp")
-        if data is None:
-            self.append("  ·  too big to keep in history\n", row, "note")
-        else:
-            self.files[number] = (filename, data)
-            self.append("  ·  ", row, "stamp")
-            self.insert_slot("end", number, "save", [("Save as…", ("link", "file_save"))])
-            self.append("\n", row)
+        self.files[number] = (filename, data)
+        self.append("  ·  ", row, "stamp")
+        self.insert_slot("end", number, "save", [("Save as…", ("link", "file_save"))])
+        self.append("\n", row)
         self.window.see("end")
 
     def add_preview(self, data, row):
@@ -985,7 +987,7 @@ class ChatApp:
         """Draw one stored or live message, which is either a chat message (MSG) or a file (FILE)."""
         mine = msg["from"] == self.me
         if msg.get("type") == FILE:
-            tab.add_file(msg["from"], msg["filename"], msg["size"], msg["data"], msg["ts"], mine)
+            tab.add_file(msg["from"], msg["filename"], msg["size"], msg.get("data"), msg["ts"], mine)   # no "data" in history
         else:
             tab.add_message(msg["from"], msg["text"], msg["ts"], mine)
 
