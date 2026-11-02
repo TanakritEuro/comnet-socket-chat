@@ -626,13 +626,25 @@ class BotTab(ttk.Frame):
         append_text(self.window, text, *tags)
 
 
+def fit_to_screen(root):
+    """Size the main window: 1100x700 at 100 % Windows scaling, grown with the scaling (1.25x at 125 %),
+    but never bigger than the screen minus the taskbar and title bar, so on a small laptop screen
+    (e.g. 1366x768 at 125 %) nothing ends up hidden below the bottom edge."""
+    scale = float(root.tk.call("tk", "scaling")) / (96 / 72)    # Tk's points-to-pixels factor; 1.0 at 100 %
+    max_width = root.winfo_screenwidth() - round(40 * scale)
+    max_height = root.winfo_screenheight() - round(110 * scale)  # taskbar + title bar + a small margin
+    width, height = min(round(1100 * scale), max_width), min(round(700 * scale), max_height)
+    root.geometry(f"{width}x{height}")
+    # The minimum keeps the AI tools strip (Translate to + Summarize chat) fully visible next to the sidebar.
+    root.minsize(min(round(880 * scale), width), min(round(480 * scale), height))
+
+
 class ChatApp:
     """Main window after login: online users, groups with members, and one tab per chat room."""
 
     def __init__(self, root, sock, name):
         apply_theme(root)
-        root.geometry("1100x700")
-        root.minsize(800, 500)
+        fit_to_screen(root)
         self.root = root
         self.sock = sock
         self.me = name
@@ -677,19 +689,21 @@ class ChatApp:
 
         self.users_label = ttk.Label(side, text="ONLINE USERS (DOUBLE-CLICK TO CHAT)", style="Section.TLabel")
         self.users_label.pack(anchor="w")
-        self.user_list = make_list(side, height=8)
+        self.user_list = make_list(side, height=6)
         self.user_list.pack(fill="x", pady=(2, 10))
         self.user_list.bind("<Double-Button-1>", self.on_user_double_click)
 
-        ttk.Label(side, text="GROUPS AND MEMBERS", style="Section.TLabel").pack(anchor="w")
-        self.group_tree = ttk.Treeview(side, show="tree", height=10, selectmode="browse")
-        self.group_tree.pack(fill="both", expand=True, pady=(2, 4))
-        self.group_tree.bind("<Double-Button-1>", self.on_group_double_click)
+        # Group buttons: packed at the bottom BEFORE the tree, like the chat box in RoomTab. When the window is
+        # short, pack takes the missing height from the widgets packed last, so the tree shrinks, not the buttons.
         buttons = ttk.Frame(side, style="White.TFrame")
-        buttons.pack(fill="x")
+        buttons.pack(side="bottom", fill="x")
         ttk.Button(buttons, text="Create…", command=self.create_group).pack(side="left", expand=True, fill="x")
         ttk.Button(buttons, text="Join", command=self.join_group).pack(side="left", expand=True, fill="x", padx=3)
         ttk.Button(buttons, text="Leave", command=self.leave_group).pack(side="left", expand=True, fill="x")
+        ttk.Label(side, text="GROUPS AND MEMBERS", style="Section.TLabel").pack(anchor="w")
+        self.group_tree = ttk.Treeview(side, show="tree", height=6, selectmode="browse")   # grows to fill the rest
+        self.group_tree.pack(fill="both", expand=True, pady=(2, 4))
+        self.group_tree.bind("<Double-Button-1>", self.on_group_double_click)
         panes.add(side, weight=0)
 
         self.notebook = ttk.Notebook(panes)

@@ -25,15 +25,16 @@ flowchart LR
         S ~~~ N
     end
     G["Google Gemini API<br/>generativelanguage.googleapis.com"]
-    S -->|"① HTTPS request<br/>TLS over TCP :443<br/>chat text to summarize"| G
-    G -->|"② HTTPS response<br/>summary text"| S
+    S -->|"① HTTPS request<br/>TLS over TCP :443<br/>AI requests: summary,<br/>chatbot, translate, mood"| G
+    G -->|"② HTTPS response<br/>AI replies"| S
     classDef note fill:#fff8c4,stroke:#b8a23a,stroke-dasharray:4 3,color:#333
     class N note
 ```
 
 - The IP addresses are examples. On the day, read the server's address from `ipconfig` (see the README's demo section).
-- The Gemini call (①, ②) happens only when someone presses **Summarize** (Special 1). The server makes it from a worker
-  thread, so chat keeps flowing while Gemini answers.
+- The Gemini calls (①, ②) carry every AI feature: **Summarize**, an **AI Assistant** question, **Translate** and
+  **Analyze mood**. Each one happens only when someone clicks it, never by itself. The server makes the call from a worker
+  thread, so chat keeps flowing while Gemini answers, and sends the reply only to the person who clicked.
 - The server listens on `0.0.0.0:5050`, which means "port 5050 on every network interface of this PC".
 - Only the **server** talks to Gemini, so the API key never leaves the server machine.
 
@@ -61,8 +62,8 @@ flowchart LR
     A <-->|"TCP to the VM's<br/>external IP, port 5050<br/>length-prefixed<br/>JSON frames"| I
     B <-->|"TCP to the VM's<br/>external IP, port 5050<br/>length-prefixed<br/>JSON frames"| I
     I <--> FW
-    VM -->|"① HTTPS request<br/>TLS over TCP :443<br/>chat text to summarize"| G
-    G -->|"② HTTPS response<br/>summary text"| VM
+    VM -->|"① HTTPS request<br/>TLS over TCP :443<br/>AI requests: summary,<br/>chatbot, translate, mood"| G
+    G -->|"② HTTPS response<br/>AI replies"| VM
 ```
 
 - **Why it works from any network:** each laptop *opens* an outgoing TCP connection to the VM, which home routers, NAT
@@ -274,9 +275,11 @@ Full spec: [`docs/PROTOCOL.md`](PROTOCOL.md). Code: `protocol.py`.
   - `recv_msg` rejects a body that isn't valid UTF-8 JSON, or isn't an object with a string `"type"`. The server then
     replies `ERROR BAD_REQUEST` and closes that connection.
 
-### HTTPS / TLS (for the AI summarization feature)
+### HTTPS / TLS (for the AI features)
 
-Used by Special 1, AI chat summarization (`ai.py`).
+Used by every AI feature: the summary (`ai.py`), the chatbot (`ai_bot.py`), translation (`ai_translate.py`) and mood analysis
+(`ai_sentiment.py`). They all send the same kind of HTTPS request to the same endpoint; the details below use the summary
+as the example.
 
 - **What:** **TLS** (Transport Layer Security) runs on top of TCP and adds **encryption** (nobody on the path can read
   the data), **integrity** (nobody can change it unnoticed) and **server authentication** (the certificate proves we're really
