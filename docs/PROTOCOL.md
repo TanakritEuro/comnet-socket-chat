@@ -59,7 +59,7 @@ TCP is a byte stream with no message boundaries, so every message is framed like
 | `GROUPS` | `groups: [{name, creator, members:[...]}]` | All groups (R9). Broadcast on every create/join/leave |
 | `MSG` | `room`, `from`, `text`, `ts` | A chat message in a DM or group room |
 | `FILE` | `room`, `from`, `filename`, `size`, `data`, `ts` | A file in a DM or group room, delivered to the same people as a `MSG` there, **including the sender** (an echo, like `MSG`). `size` is in bytes, measured by the server. `ts` is the message id, from the same counter as `MSG`. In a `HISTORY` reply, a file bigger than 256 KiB has `"data": null` (the server doesn't keep big files), so the client shows its name and size only |
-| `HISTORY` | `room`, `messages: [MSG or FILE objects]` | Sent **only to the requester**. `messages` are the stored objects exactly as they were delivered (same `ts`, so a message keeps its id), oldest first: up to the last 200 of the room, and only from after the requester joined for a group. If a few huge messages would make the reply bigger than 1 MiB, the oldest ones are left out |
+| `HISTORY` | `room`, `messages: [MSG or FILE objects]` | Sent **only to the requester**. `messages` are the stored objects, oldest first (same `ts`, so a message keeps its id): up to the last 200 of the room, and only from after the requester joined for a group. A `MSG` is exactly as delivered. A `FILE` is **metadata only**: `{type, room, from, filename, size, ts, data_omitted: true}` with **no `data`** (see [Message buffer](#message-buffer)). If a few huge messages would make the reply bigger than 1 MiB, the oldest ones are left out |
 | `TYPING` | `room`, `from`, `on` | |
 | `SUMMARY` | `room`, `text`, `model` | Sent **only to the requester**, usually a few seconds later. `model` = the Gemini model that answered (e.g. `gemini-3.1-flash-lite`) or `"offline"` when no AI was used (no key, no messages, or every model failed) |
 | `TRANSLATION` | `room`, `ts`, `to`, `source`, `text`, `model` | Sent **only to the requester**. `room` + `ts` name the original message, `source` is the detected language code (e.g. `th`), `text` the translation, `model` the Gemini model that answered |
@@ -97,7 +97,11 @@ that member joined (the server records join times on create/join and forgets the
 - The buffer holds `MSG` **and `FILE`** objects (`"type"` tells them apart). A `FILE` has no `"text"`, so code that reads
   buffered messages must check the type: `TRANSLATE` / `SENTIMENT` answer `BAD_REQUEST` for a file, and the AI only ever
   sees `[sent a file: name]` through `ai.message_text` (the file's bytes are never sent to Gemini).
-- A file of up to 256 KiB is stored with its data. A bigger one is stored with `data: null`, so 200 messages can't use gigabytes of RAM.
+- A `FILE` is stored as **metadata only**, whatever its size: `{"type": "FILE", "room", "from", "filename", "size", "ts",
+  "data_omitted": true}`, without `"data"`. 200 files of 5 MiB per room would otherwise fill the server's RAM. Live delivery
+  is unchanged (receivers get the bytes once, when the file is sent); history only shows that the file was sent, and the
+  client draws it as `📎 name (size) — sent earlier, not stored on the server`. With no bytes in the buffer, Summarize,
+  the chatbot, Translate and Mood can never pass file data to the AI.
 - `ts` comes from `MessageBuffer.next_ts(room)`: the current time, or the room's previous `ts` + 1 µs if the clock
   hasn't moved on (on Windows `time.time()` only ticks about every 15 ms, so two messages could otherwise share a `ts`).
 
