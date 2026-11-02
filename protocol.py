@@ -82,15 +82,20 @@ class ProtocolError(Exception):
 # Framing: send_msg / recv_msg
 # ---------------------------------------------------------------------------
 
-def send_msg(sock, msg):
-    """Encode `msg` (a dict) as JSON and send it as one length-prefixed frame."""
+def encode_frame(msg):
+    """Encode `msg` (a dict) as one length-prefixed frame: 4-byte length + UTF-8 JSON."""
     # ensure_ascii=False keeps Thai and other non-English text as real UTF-8 (shorter, readable in Wireshark).
     body = json.dumps(msg, ensure_ascii=False).encode("utf-8")
     if len(body) > MAX_FRAME:
         raise ProtocolError(TOO_LARGE, f"message is {len(body)} bytes, limit is {MAX_FRAME}")
+    return HEADER.pack(len(body)) + body
+
+
+def send_msg(sock, msg):
+    """Encode `msg` (a dict) and send it as one length-prefixed frame."""
     # sendall() keeps calling send() until every byte is handed to the OS.
     # A plain send() may send only part of the buffer.
-    sock.sendall(HEADER.pack(len(body)) + body)
+    sock.sendall(encode_frame(msg))
 
 
 def recv_exact(sock, n):

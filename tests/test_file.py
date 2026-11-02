@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # so "import s
 sys.path.insert(0, str(Path(__file__).resolve().parent))          # so "import test_server" works too
 
 import ai
-import server
 from protocol import (
     BAD_REQUEST, ERROR, FILE, HISTORY, MAX_FILE_BYTES, MSG, NO_SUCH_GROUP, NO_SUCH_USER, NOT_MEMBER,
     SUMMARIZE, SUMMARY, TOO_LARGE, clean_filename,
@@ -118,24 +117,26 @@ class Special2FileTests(ServerTestCase):
         self.bob.assert_no(FILE)
         # The connection stays open and a file of exactly 5 MiB still goes through.
         self.send_file(self.alice, "dm:alice|bob", b"y" * MAX_FILE_BYTES, "max.bin")
-        # Read alice's echo first: the server sends to alice, then to bob, and a 7 MB frame doesn't fit in
-        # the socket buffer, so the server waits until alice reads it (see the ChatServer docstring).
+        # Each client has its own writer thread, so alice and bob can read their copies in any order.
         self.assertEqual(self.alice.wait_for(FILE)["size"], MAX_FILE_BYTES)
         self.assertEqual(self.bob.wait_for(FILE)["size"], MAX_FILE_BYTES)
 
-    def test_small_file_is_kept_in_history_with_its_bytes(self):
-        self.send_file(self.alice, "dm:alice|bob", b"keep me", "keep.txt")
-        sent = self.bob.wait_for(FILE)
-        self.assertEqual(self.history(self.bob, "dm:alice|bob"), [sent])      # exactly what was delivered
-
-    def test_big_file_stays_in_history_without_its_bytes(self):
-        raw = b"z" * (server.HISTORY_FILE_MAX + 1)
-        self.send_file(self.alice, "dm:alice|bob", raw, "big.bin")
-        sent = self.bob.wait_for(FILE)
-        self.assertEqual(base64.b64decode(sent["data"]), raw)               # live delivery has the bytes
-        (kept,) = self.history(self.bob, "dm:alice|bob")
-        self.assertEqual((kept["filename"], kept["size"], kept["data"], kept["ts"]),
-                         ("big.bin", len(raw), None, sent["ts"]))           # history: name and size only
+    def test_history_keeps_files_as_metadata_only(self):
+        """Live delivery carries the bytes; history keeps only who sent which file, when, and how big."""
+        for raw, filename in [(b"keep me", "small.txt"), (b"z" * 300_000, "big.bin")]:
+            self.send_file(self.alice, "dm:alice|bob", raw, filename)
+            sent = self.bob.wait_for(FILE, filename=filename)
+            self.assertEqual(base64.b64decode(sent["data"]), raw)           # live delivery has the bytes
+        kept = self.history(self.bob, "dm:alice|bob")
+        self.assertEqual([m["filename"] for m in kept], ["small.txt", "big.bin"])
+        for m in kept:
+            self.assertNotIn("data", m)                                     # no bytes in history, whatever the size
+            self.assertIs(m["data_omitted"], True)
+            self.assertEqual(set(m), {"type", "room", "from", "filename", "size", "ts", "data_omitted"})
+        self.assertEqual([m["size"] for m in kept], [7, 300_000])
+        with self.server.lock:                                              # nor in the server's memory
+            stored = self.server.buffer.recent("dm:alice|bob", limit=None)
+        self.assertFalse(any("data" in m for m in stored))
 
     def test_history_of_files_respects_privacy(self):
         self.send_file(self.alice, "dm:alice|bob")
@@ -148,6 +149,7 @@ class FileAndAiTests(ServerTestCase):
     """A file must reach the AI as one short line, never as base64 bytes."""
 
     def summarizer(self, room, messages):
+        self.given = messages
         self.prompt = ai.build_prompt(room, messages)
         return "fake summary", "fake-model"
 
@@ -161,6 +163,7 @@ class FileAndAiTests(ServerTestCase):
         alice.wait_for(SUMMARY)
         self.assertIn("[sent a file: plan.pdf]", self.prompt)
         self.assertNotIn(b64(secret), self.prompt)
+        self.assertFalse(any("data" in m for m in self.given))     # the AI code never even receives the bytes
 
     def test_offline_summary_describes_a_file(self):
         messages = [{"type": FILE, "from": "alice", "filename": "plan.pdf", "data": "AAAA", "ts": 1.0},

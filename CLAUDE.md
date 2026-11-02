@@ -20,7 +20,7 @@ a **simple chat application built with socket programming**. Group of 4 students
 |---|---|---|
 | Language | Python 3.10+ | Everyone in the group can read it |
 | Transport | Raw TCP with the stdlib `socket` module | R2 demands "socket programming only": no Socket.IO, no WebSocket libs, no HTTP for chat |
-| Concurrency | Server: one `threading.Thread` per client + one `threading.Lock` for shared state. Client: one receiver thread → `queue.Queue` → Tkinter polls with `root.after()` | Simple to explain; Tkinter is not thread-safe, so never touch widgets from the network thread |
+| Concurrency | Server: per client a reader thread (`handle_client`) and a writer thread with its own send queue (`Conn`), plus one `threading.Lock` for shared state. Handlers decide who receives what under the lock and only *queue* frames; the network write happens outside the lock. Client: one receiver thread → `queue.Queue` → Tkinter polls with `root.after()` | Simple to explain; a slow client can't block the server; Tkinter is not thread-safe, so never touch widgets from the network thread |
 | Framing | 4-byte big-endian length prefix + UTF-8 JSON body | TCP is a byte stream, so we need message boundaries |
 | GUI | Tkinter (stdlib) | Ships with the python.org installer on Windows; no installs during the demo |
 | AI feature | Chat summarization through the Google Gemini REST API, called **from the server** with `urllib.request` over HTTPS | Keeps the API key on the server only. If no key is set, fall back to a simple offline summary so the demo never breaks |

@@ -84,11 +84,13 @@ flowchart LR
 ```mermaid
 flowchart LR
     L(["listening socket<br/>0.0.0.0:5050"]) --> ACC["main thread<br/>serve_forever()<br/>loop: accept()"]
-    ACC -->|"new socket +<br/>new thread"| T1["alice's thread<br/>handle_client()<br/>recv_msg() on<br/>alice's socket"]
-    ACC -->|"new socket +<br/>new thread"| T2["bob's thread<br/>handle_client()<br/>recv_msg() on<br/>bob's socket"]
-    T1 <-->|"with lock"| ST[("shared state<br/>clients: name → socket<br/>groups: name → members")]
+    ACC -->|"new socket +<br/>reader + writer thread"| T1["alice's reader thread<br/>handle_client()<br/>recv_msg() on<br/>alice's socket"]
+    ACC -->|"new socket +<br/>reader + writer thread"| T2["bob's reader thread<br/>handle_client()<br/>recv_msg() on<br/>bob's socket"]
+    T1 <-->|"with lock"| ST[("shared state<br/>clients: name → Conn<br/>groups: name → members")]
     T2 <-->|"with lock"| ST
-    T1 -.->|"send_msg() to bob's socket<br/>(while holding lock)"| BS(["bob's socket<br/>(TCP to bob's PC)"])
+    T1 -.->|"put(frame) in<br/>bob's queue<br/>(under the lock,<br/>never waits)"| BQ[["bob's send queue<br/>(Conn.outbox)"]]
+    BQ --> BW["bob's writer thread<br/>Conn.write_loop()<br/>sendall(), no lock"]
+    BW --> BS(["bob's socket<br/>(TCP to bob's PC)"])
     T2 -->|"SUMMARIZE:<br/>start a worker"| W["summary worker thread<br/>ai.summarize()<br/>HTTPS to Gemini<br/>(no lock held)"]
 ```
 
@@ -103,13 +105,20 @@ flowchart LR
     GUI -->|"send_msg()<br/>when you press Send"| S
 ```
 
-- **Server:** `accept()` returns a new socket for each client. Each socket gets its own thread, which blocks in `recv()` on
-  that client only. All threads share the `clients` and `groups` dictionaries, so one `threading.Lock` protects them.
-- **Any** server thread may write to a client's socket (the dashed arrow). When alice sends bob a DM, it's *alice's* thread that
-  writes to *bob's* socket, while bob's own thread may be writing to it at the same moment. So sends also happen under the
-  lock; otherwise two threads could interleave the bytes of two frames on one socket.
+- **Server:** `accept()` returns a new socket for each client. Each client gets **two** threads: a reader thread that blocks
+  in `recv()` on that client only, and a writer thread (`Conn`) that is the only code ever writing to that socket. All reader
+  threads share the `clients` and `groups` dictionaries and the message buffer, so one `threading.Lock` protects them.
+- **Sending** (the dashed arrow): when alice sends bob a DM, *alice's* reader thread decides, under the lock, who receives
+  what (privacy checks, the message id, storing it in the buffer). It then only **puts** the encoded frame in **bob's send
+  queue**, which never waits. bob's writer thread takes frames off his queue one by one and calls `sendall()` **outside any
+  lock**. So:
+  - frames never mix their bytes on one socket, because only one thread writes to it;
+  - every client gets frames in the order the state changed, because they were queued under the lock (e.g. a DM can't arrive
+    after a `HISTORY` that already contains it, and an old `USERS` list can't overtake a newer one);
+  - a slow client (a 5 MiB file over a bad link, or a client that stops reading) only delays **its own** queue, never the lock,
+    the sender, or anyone else. If it falls more than 32 MiB behind, the server disconnects it, so its queue can't fill the RAM.
 - **Summary worker (Special 1):** a `SUMMARIZE` request starts a short-lived worker thread that calls Gemini **without**
-  holding the lock (it can take seconds), then takes the lock just to send the `SUMMARY` back to the requester.
+  holding the lock (it can take seconds), then takes the lock just to queue the `SUMMARY` for the requester.
 - **Client:** Tkinter is not thread-safe, so only the main thread touches widgets. The receiver thread just
   blocks in `recv()` and puts messages on a queue, which the main thread drains with `root.after()`. The GUI never freezes
   while waiting for the network.
