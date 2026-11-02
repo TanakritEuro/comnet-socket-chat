@@ -8,7 +8,7 @@ Change either one here first, then in the code, in the same PR.
 |---|---|---|---|
 | Summarization | euro | Click **Summarize** in the AI strip | `SUMMARIZE` → `SUMMARY` (done) |
 | Translation | mee | Pick a language once, click **Translate** under a message | `TRANSLATE` → `TRANSLATION` (done) |
-| Sentiment | magga | Click **Analyze mood** on a message | `SENTIMENT` → `SENTIMENT_RESULT` |
+| Sentiment | magga | Click **Analyze mood** on a message | `SENTIMENT` → `SENTIMENT_RESULT` (done) |
 | Chatbot | timsum | Open **AI Assistant** in the sidebar and ask | `BOT_ASK` → `BOT_REPLY` (done) |
 
 Rules every AI feature follows:
