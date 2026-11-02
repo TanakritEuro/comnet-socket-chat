@@ -12,6 +12,7 @@ import binascii
 import json
 import logging
 import os
+import queue
 import socket
 import threading
 import time
@@ -26,7 +27,7 @@ from protocol import (
     DM, ERROR, FILE, GROUP_CREATE, GROUP_EXISTS, GROUP_JOIN, GROUP_LEAVE, GROUP_MSG, GROUPS, HELLO, HISTORY,
     MAX_FILE_BYTES, MAX_NAME_LEN, MSG, NAME_TAKEN, NO_SUCH_GROUP, NO_SUCH_MESSAGE, NO_SUCH_USER, NOT_MEMBER,
     SENTIMENT, SENTIMENT_RESULT, SUMMARIZE, SUMMARY, TOO_LARGE, TRANSLATE, TRANSLATION, USERS, WELCOME,
-    ProtocolError, clean_filename, clean_name, dm_room, group_room, recv_msg, send_msg,
+    ProtocolError, clean_filename, clean_name, dm_room, encode_frame, group_room, recv_msg,
 )
 
 log = logging.getLogger("server")
@@ -36,6 +37,7 @@ BUFFER_SIZE = 200       # messages kept per room (chat history, special 3)
 AI_CONTEXT = 50         # newest messages handed to the AI, so a long history doesn't cost more tokens
 HISTORY_MAX_BYTES = 1024 * 1024   # one HISTORY reply stays far below the 10 MiB frame limit
 HISTORY_FILE_MAX = 256 * 1024     # files bigger than this are not kept in history (200 x 5 MiB would fill the RAM)
+MAX_QUEUED_BYTES = 32 * 1024 * 1024   # a client this far behind in reading is disconnected (bounds the server's RAM)
 TRANSLATING_MAX = 3     # translations one user may have in progress at once (protects the tiny API quota)
 TRANSLATION_CACHE = 200  # finished translations kept, so the same click again costs no API call
 ANALYZING_MAX = 3       # mood analyses one user may have in progress at once (protects the tiny API quota)
@@ -80,16 +82,89 @@ class MessageBuffer:
         return now
 
 
-class ChatServer:
-    """Holds the shared chat state and runs one thread per connected client.
+class Conn:
+    """One client's TCP connection: the socket, plus its own outgoing queue and writer thread.
 
-    Locking rule: every read or write of self.clients / self.groups, and every
-    send, happens while holding self.lock. Holding the lock while sending means:
-      1. two threads never write into the same socket at the same time, which
-         would mix the bytes of two frames together, and
-      2. every client receives USERS/GROUPS updates in the same order the state changed.
-    Trade-off: a client that stops reading could stall the server once its TCP
-    send buffer fills up. That is acceptable for a classroom chat.
+    Handlers "send" with put() while they hold ChatServer.lock. put() only appends the frame to the
+    queue, so it never waits for the network. The writer thread is the only code that writes to this
+    socket, which means:
+      - frames never interleave (only one thread ever calls sendall on it), and
+      - frames leave in exactly the order they were queued, i.e. the order the server's state changed.
+    The slow part, sendall(), runs in the writer thread without any lock: a client on a slow link (or one
+    that stops reading) only delays its own queue. If it falls more than MAX_QUEUED_BYTES behind, it is
+    disconnected, so one stuck client can't fill the server's memory either.
+    """
+
+    def __init__(self, sock, label):
+        self.sock = sock
+        self.label = label                  # "host:port", for log lines
+        self.outbox = queue.Queue()         # encoded frames waiting to be sent; None means "stop"
+        self.lock = threading.Lock()        # guards queued_bytes and closed (never held while sending)
+        self.queued_bytes = 0
+        self.closed = False
+        threading.Thread(target=self.write_loop, daemon=True).start()
+
+    def put(self, frame):
+        """Queue one encoded frame for this client. Never blocks. Ignored once the connection is closing."""
+        with self.lock:
+            if self.closed:
+                return
+            if self.queued_bytes + len(frame) <= MAX_QUEUED_BYTES:
+                self.queued_bytes += len(frame)
+                self.outbox.put(frame)
+                return
+        log.warning("%s is not reading fast enough (over %d MiB waiting): disconnecting it",
+                    self.label, MAX_QUEUED_BYTES // 1024 // 1024)
+        self.abort()
+
+    def write_loop(self):
+        """Writer thread: send the queued frames one at a time, in order, outside every lock."""
+        while True:
+            frame = self.outbox.get()
+            if frame is None:
+                break                       # close() or abort(): stop here
+            try:
+                self.sock.sendall(frame)    # may wait for a slow client; only this thread waits
+            except OSError:
+                self.abort()                # the client is gone; its reader thread cleans up
+                break
+            with self.lock:
+                self.queued_bytes -= len(frame)
+        self.sock.close()
+
+    def close(self):
+        """No more frames: the writer sends what is already queued (e.g. a last ERROR), then closes the socket."""
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+        self.outbox.put(None)
+
+    def abort(self):
+        """Give up on this client now, and make both of its threads end: a recv() waiting in the reader
+        thread and a sendall() stuck on a full buffer in the writer thread both fail, and the reader
+        thread then removes the client as for any disconnect."""
+        with self.lock:
+            self.closed = True
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)    # Linux/macOS: this wakes a waiting recv()
+        except OSError:
+            pass                                    # already closed
+        self.sock.close()                           # Windows: shutdown alone doesn't wake recv(); closing does
+        self.outbox.put(None)
+
+
+class ChatServer:
+    """Holds the shared chat state and runs two threads per connected client: a reader (handle_client)
+    and a writer (Conn.write_loop).
+
+    Locking rule: every read or write of self.clients / self.groups / self.buffer happens while holding
+    self.lock, and so does every send(): handlers decide WHO receives WHAT under the lock. But send()
+    only puts the frame in the receiver's queue; the receiver's own writer thread does the network write
+    later, outside the lock. So:
+      1. two frames never mix their bytes on one socket (one writer per socket),
+      2. every client receives frames in the order the state changed (they were queued under the lock),
+      3. a slow client never holds up the lock, other clients, or the sender.
     """
 
     def __init__(self, host="0.0.0.0", port=5050, summarizer=ai.summarize, bot=ai_bot.ask,
@@ -97,7 +172,7 @@ class ChatServer:
         self.host = host
         self.port = port
         self.lock = threading.Lock()
-        self.clients = {}   # name -> socket of that client's TCP connection
+        self.clients = {}   # name -> Conn (that client's TCP connection and send queue)
         self.groups = {}    # group name -> {"creator": name, "members": [names, in join order],
                             #                "joined": {name: Unix time they joined}}
         self.buffer = MessageBuffer()
@@ -173,9 +248,10 @@ class ChatServer:
     def handle_client(self, sock, addr):
         """Thread body for one client: log in, then handle its messages until it disconnects."""
         log.info("connection from %s:%s", *addr)
+        conn = Conn(sock, f"{addr[0]}:{addr[1]}")     # starts this client's writer thread
         name = None
         try:
-            name = self.login(sock)
+            name = self.login(conn)
             if name is None:
                 return                      # hung up before logging in (finally still closes the socket)
             while True:
@@ -185,45 +261,51 @@ class ChatServer:
                 handler = self.handlers.get(msg["type"])
                 if handler is None:
                     with self.lock:
-                        self.send_error(sock, BAD_REQUEST, f"unknown message type {msg['type']!r}")
+                        self.send_error(conn, BAD_REQUEST, f"unknown message type {msg['type']!r}")
                 else:
                     handler(name, msg)
         except ProtocolError as e:
             # The peer sent bytes that don't follow our framing: say why, then hang up.
             with self.lock:
-                self.send_error(sock, e.code, str(e))
+                self.send_error(conn, e.code, str(e))
         except OSError as e:
             # ConnectionResetError (peer crashed or was killed) and friends are OSError subclasses.
             log.info("%s: connection error: %s", name or addr, e)
         finally:
             if name is not None:
                 self.remove_client(name)
-            sock.close()
+            conn.close()                    # the writer sends what is still queued, then closes the socket
             log.info("%s disconnected", name or f"{addr[0]}:{addr[1]}")
 
     # ------------------------------------------------------------------
-    # Sending helpers (caller must hold self.lock)
+    # Sending helpers (caller must hold self.lock, so frames are queued in the order the state changed).
+    # They only queue: each client's writer thread does the actual network send, outside the lock.
     # ------------------------------------------------------------------
 
-    def send(self, sock, msg):
-        """Send one message to one socket. A dead socket is ignored here,
-        because that client's own thread will notice the disconnect and clean up."""
-        try:
-            send_msg(sock, msg)
-        except OSError:
-            pass
+    def send(self, conn, msg):
+        """Queue one message for one client."""
+        self.deliver(msg, [conn])
 
-    def send_error(self, sock, code, text, **extra):
+    def deliver(self, msg, conns):
+        """Queue one message for several clients, encoding it only once (a 5 MiB file is a big frame).
+        A client that has gone is skipped by its Conn; its own reader thread cleans up."""
+        try:
+            frame = encode_frame(msg)
+        except ProtocolError:               # bigger than MAX_FRAME: it can't be sent to anyone
+            log.warning("not sending a %s frame that is over the size limit", msg.get("type"))
+            return
+        for conn in conns:
+            conn.put(frame)
+
+    def send_error(self, conn, code, text, **extra):
         """Send an ERROR to one client. `extra` adds fields such as request="BOT_ASK", so the
         client can tell which of its requests failed (see PROTOCOL.md)."""
-        self.send(sock, {"type": ERROR, "code": code, "message": text, **extra})
+        self.send(conn, {"type": ERROR, "code": code, "message": text, **extra})
 
     def broadcast_users(self):
         """R4: send the full online list to every client. Everyone gets the same list,
         so each client also sees its own name in it."""
-        msg = {"type": USERS, "users": sorted(self.clients)}
-        for sock in self.clients.values():
-            self.send(sock, msg)
+        self.deliver({"type": USERS, "users": sorted(self.clients)}, list(self.clients.values()))
 
     def groups_message(self):
         """R9: build a GROUPS message listing every group with its creator and members."""
@@ -235,39 +317,37 @@ class ChatServer:
 
     def broadcast_groups(self):
         """R9: send the group list to every client after any create/join/leave."""
-        msg = self.groups_message()
-        for sock in self.clients.values():
-            self.send(sock, msg)
+        self.deliver(self.groups_message(), list(self.clients.values()))
 
     # ------------------------------------------------------------------
     # Login and logout (R3, R4)
     # ------------------------------------------------------------------
 
-    def login(self, sock):
+    def login(self, conn):
         """R3: wait for a HELLO with a valid name that nobody online is using.
 
         Returns the accepted name, or None if the client disconnected first.
         After an ERROR the client may simply send another HELLO on the same connection.
         """
         while True:
-            msg = recv_msg(sock)
+            msg = recv_msg(conn.sock)
             if msg is None or msg["type"] == BYE:
                 return None
             with self.lock:
                 if msg["type"] != HELLO:
-                    self.send_error(sock, BAD_REQUEST, "send HELLO first")
+                    self.send_error(conn, BAD_REQUEST, "send HELLO first")
                     continue
                 name = clean_name(msg.get("name"))
                 if name is None:
-                    self.send_error(sock, BAD_NAME, f"name {NAME_RULES}")
+                    self.send_error(conn, BAD_NAME, f"name {NAME_RULES}")
                     continue
                 if name in self.clients:
-                    self.send_error(sock, NAME_TAKEN, f"the name {name!r} is already in use")
+                    self.send_error(conn, NAME_TAKEN, f"the name {name!r} is already in use")
                     continue
-                self.clients[name] = sock
-                self.send(sock, {"type": WELCOME, "name": name})
+                self.clients[name] = conn
+                self.send(conn, {"type": WELCOME, "name": name})
                 self.broadcast_users()                  # R4: everyone sees the new name
-                self.send(sock, self.groups_message())  # R9: the newcomer sees existing groups
+                self.send(conn, self.groups_message())  # R9: the newcomer sees existing groups
                 log.info("%s logged in", name)
                 return name
 
@@ -413,9 +493,7 @@ class ChatServer:
             out = {"type": FILE, "room": room, "from": name, "filename": filename, "size": len(raw),
                    "data": data, "ts": self.buffer.next_ts(room)}
             self.buffer.add(out)
-            self.send(me, out)                  # echo, so the sender's window shows it too
-            for sock in receivers:
-                self.send(sock, out)
+            self.deliver(out, [me, *receivers])     # echo to the sender too, so its window shows the file
             log.info("%s sent %s (%d bytes) to %s", name, filename, len(raw), room)
 
     def handle_history(self, name, msg):
@@ -432,7 +510,7 @@ class ChatServer:
                 return                          # an ERROR was already sent
             messages = self.buffer.recent(room, since, limit=None)
             # The whole history travels in one frame. If a few huge messages would make it too big,
-            # leave out the oldest ones rather than fail (send_msg refuses frames over MAX_FRAME).
+            # leave out the oldest ones rather than fail (encode_frame refuses frames over MAX_FRAME).
             sizes = [len(json.dumps(m, ensure_ascii=False).encode("utf-8")) for m in messages]
             while messages and sum(sizes) > HISTORY_MAX_BYTES:
                 messages.pop(0)
@@ -457,7 +535,7 @@ class ChatServer:
             messages = self.buffer.recent(room, since)
         threading.Thread(target=self.summarize_worker, args=(name, me, room, messages), daemon=True).start()
 
-    def summarize_worker(self, name, sock, room, messages):
+    def summarize_worker(self, name, conn, room, messages):
         """Worker thread: ask the AI (slow, no lock held), then reply to the requester only."""
         try:
             text, model = self.summarizer(room, messages)
@@ -466,8 +544,8 @@ class ChatServer:
             text, model = ai.offline_summary(messages, "summarizer error"), ai.OFFLINE
         with self.lock:
             self.summarizing.discard(name)
-            if self.clients.get(name) is sock:  # still the same connection (not gone, not a new login)
-                self.send(sock, {"type": SUMMARY, "room": room, "text": text, "model": model})
+            if self.clients.get(name) is conn:  # still the same connection (not gone, not a new login)
+                self.send(conn, {"type": SUMMARY, "room": room, "text": text, "model": model})
         log.info("summary for %s in %s: %d messages, model %s", name, room, len(messages), model)
 
     def handle_translate(self, name, msg):
@@ -509,7 +587,7 @@ class ChatServer:
             self.translating.add((name, room, ts))
         threading.Thread(target=self.translate_worker, args=(name, me, room, ts, to, text), daemon=True).start()
 
-    def translate_worker(self, name, sock, room, ts, to, text):
+    def translate_worker(self, name, conn, room, ts, to, text):
         """Worker thread: ask the AI (slow, no lock held), then reply to the requester only."""
         result = None
         try:
@@ -524,12 +602,12 @@ class ChatServer:
                 self.translations[(room, ts, to)] = result
                 while len(self.translations) > TRANSLATION_CACHE:
                     self.translations.popitem(last=False)       # forget the oldest
-            if self.clients.get(name) is not sock:
+            if self.clients.get(name) is not conn:
                 return                          # the requester left (or logged in again): nobody to answer
             if result is None:
-                return self.send_error(sock, AI_FAILED, "the translation couldn't be made right now, try again",
+                return self.send_error(conn, AI_FAILED, "the translation couldn't be made right now, try again",
                                        request=TRANSLATE, room=room, ts=ts)
-            self.send(sock, self.translation_message(room, ts, to, *result))
+            self.send(conn, self.translation_message(room, ts, to, *result))
         log.info("translation for %s in %s to %s: model %s", name, room, to, result[2])
 
     @staticmethod
@@ -567,7 +645,7 @@ class ChatServer:
             self.analyzing.add((name, room, ts))
         threading.Thread(target=self.sentiment_worker, args=(name, me, room, ts, text), daemon=True).start()
 
-    def sentiment_worker(self, name, sock, room, ts, text):
+    def sentiment_worker(self, name, conn, room, ts, text):
         """Worker thread: ask the AI (slow, no lock held), then reply to the requester only."""
         result = None
         try:
@@ -580,12 +658,12 @@ class ChatServer:
                 self.moods[(room, ts)] = result
                 while len(self.moods) > MOOD_CACHE:
                     self.moods.popitem(last=False)
-            if self.clients.get(name) is not sock:
+            if self.clients.get(name) is not conn:
                 return                          # the requester left
             if result is None:
-                return self.send_error(sock, AI_FAILED, "the mood couldn't be analyzed right now, try again",
+                return self.send_error(conn, AI_FAILED, "the mood couldn't be analyzed right now, try again",
                                        request=SENTIMENT, room=room, ts=ts)
-            self.send(sock, self.sentiment_message(room, ts, *result))
+            self.send(conn, self.sentiment_message(room, ts, *result))
         log.info("mood for %s in %s: %s, model %s", name, room, result[0], result[1])
 
     @staticmethod
@@ -619,7 +697,7 @@ class ChatServer:
         threading.Thread(target=self.bot_worker, args=(name, me, text, room, messages, history, context),
                          daemon=True).start()
 
-    def bot_worker(self, name, sock, text, room, messages, history, context):
+    def bot_worker(self, name, conn, text, room, messages, history, context):
         """Worker thread: ask the AI (slow, no lock held), then reply to the asker only."""
         answer = model = None
         try:
@@ -630,10 +708,10 @@ class ChatServer:
             log.exception("chatbot crashed")
         with self.lock:
             self.asking.discard(name)
-            if self.clients.get(name) is not sock:
+            if self.clients.get(name) is not conn:
                 return                          # the asker left (or logged in again): nobody to answer
             if answer is None:
-                return self.send_error(sock, AI_FAILED, "the assistant couldn't answer right now, try again",
+                return self.send_error(conn, AI_FAILED, "the assistant couldn't answer right now, try again",
                                        request=BOT_ASK)
             # Remember the pair, except the "no API key" notice, which isn't part of the conversation.
             # If the user cleared the chat (or left) while we waited, `history` is no longer in
@@ -641,7 +719,7 @@ class ChatServer:
             if model != ai.OFFLINE:
                 history.append((text, answer))
                 del history[:-ai_bot.MAX_PAIRS]     # keep only the newest pairs
-            self.send(sock, {"type": BOT_REPLY, "text": answer, "model": model, "ts": time.time()})
+            self.send(conn, {"type": BOT_REPLY, "text": answer, "model": model, "ts": time.time()})
         log.info("chatbot answer for %s: model %s", name, model)
 
     def handle_bot_clear(self, name, msg):
@@ -649,7 +727,7 @@ class ChatServer:
         with self.lock:
             self.bot_history.pop(name, None)
 
-    def visible_since(self, sock, name, room_id, **extra):
+    def visible_since(self, conn, name, room_id, **extra):
         """Privacy check for reading a room's past messages (same rules as delivery, R7/R11).
 
         Returns the Unix time from which `name` may read the room `room_id`: 0 for their own DMs, their
@@ -657,26 +735,26 @@ class ChatServer:
         include "room" and "ts" for a per-message request) and returns None. Caller holds the lock.
         """
         if not isinstance(room_id, str) or not room_id.startswith(("dm:", "group:")):
-            self.send_error(sock, BAD_REQUEST, f"{room_id!r} is not a room id", **extra)
+            self.send_error(conn, BAD_REQUEST, f"{room_id!r} is not a room id", **extra)
             return None
         if room_id.startswith("dm:"):
             if name not in room_id.removeprefix("dm:").split("|"):
-                self.send_error(sock, NOT_MEMBER, "you can only read your own private chats", **extra)
+                self.send_error(conn, NOT_MEMBER, "you can only read your own private chats", **extra)
                 return None
             return 0.0
-        info = self.find_group(sock, room_id.removeprefix("group:"), **extra)
+        info = self.find_group(conn, room_id.removeprefix("group:"), **extra)
         if info is None:
             return None
         if name not in info["members"]:
-            self.send_error(sock, NOT_MEMBER, f"join {room_id.removeprefix('group:')!r} first", **extra)
+            self.send_error(conn, NOT_MEMBER, f"join {room_id.removeprefix('group:')!r} first", **extra)
             return None
         return info["joined"][name]             # only messages from after they joined
 
-    def find_group(self, sock, group, **extra):
+    def find_group(self, conn, group, **extra):
         """Return the group's info dict, or send NO_SUCH_GROUP and return None. Caller holds the lock."""
         info = self.groups.get(group) if isinstance(group, str) else None
         if info is None:
-            self.send_error(sock, NO_SUCH_GROUP, f"there is no group {group!r}", **extra)
+            self.send_error(conn, NO_SUCH_GROUP, f"there is no group {group!r}", **extra)
         return info
 
 

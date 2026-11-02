@@ -37,8 +37,7 @@ class Special3HistoryTests(ServerTestCase):
         return client.wait_for(HISTORY, room=room)["messages"]
 
     def dm(self, sender, to, receiver, text):
-        """Send a DM and read it on both ends. The sender must read its echo too: a client that stops
-        reading fills its TCP buffer and stalls the server (see the ChatServer docstring)."""
+        """Send a DM and wait until both ends have read it (the sender gets an echo)."""
         sender.send(DM, to=to, text=text)
         sender.wait_for(MSG, text=text)
         return receiver.wait_for(MSG, text=text)
