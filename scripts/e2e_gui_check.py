@@ -11,6 +11,7 @@ Rerun it after every feature PR. Exit code 0 means every check passed.
 """
 
 import argparse
+import logging
 import os
 import socket
 import struct
@@ -30,7 +31,7 @@ import ai
 import ai_bot
 import ai_translate
 import client
-from protocol import DM, FILE, HELLO, MSG, SUMMARY, TRANSLATION, recv_msg, send_msg
+from protocol import DM, FILE, HELLO, MSG, SENTIMENT_RESULT, SUMMARY, TRANSLATION, recv_msg, send_msg
 from server import ChatServer
 
 TIMEOUT = 3.0           # seconds to wait for the GUI to show something
@@ -119,6 +120,18 @@ def fake_translator(text, to):
     return f"[{to}] {text}", "th", "fake-model"
 
 
+FAIL_ONCE = set()       # message texts for which fake_analyzer fails the first time, to test the error and retry path
+
+
+def fake_analyzer(text):
+    """Stands in for Gemini, so the check never uses the real API quota or reads the .env key.
+    Every message is "positive", except that it fails once for each text in FAIL_ONCE."""
+    if text in FAIL_ONCE:
+        FAIL_ONCE.discard(text)
+        raise RuntimeError("fake failure")
+    return "positive", "fake-model"
+
+
 def screenshot(windows, path):
     """Save a PNG covering the given windows (Windows only: PowerShell + .NET do the capture)."""
     left = min(w.winfo_rootx() for w in windows) - 10
@@ -148,7 +161,9 @@ def main():
     record_popups()
 
     # port 0: the OS picks a free port
-    server = ChatServer("127.0.0.1", 0, summarizer=offline_summarizer, bot=offline_bot, translator=fake_translator)
+    logging.getLogger("server").addHandler(logging.NullHandler())      # the fake analyzer's deliberate crash isn't news
+    server = ChatServer("127.0.0.1", 0, summarizer=offline_summarizer, bot=offline_bot, translator=fake_translator,
+                        analyzer=fake_analyzer)
     port = server.start()
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
@@ -211,8 +226,7 @@ def main():
     check("R11 bob sees the group message", wait_until(root, lambda: "hello group" in text_of(bob.rooms["group:net lab"])))
     check("R7/R11 carol received no chat message", not any(m["type"] == MSG for m in raw_messages(carol)))
 
-    # AI shell: the buttons exist, their stubs are harmless, and the result methods the features will call work.
-    # (No real AI feature is connected yet, so these call the tab's result methods directly.)
+    # AI tools: the controls exist, and Translate and Analyze mood work through the real server (with fake AI).
     bob_dm = bob.rooms["dm:alice|bob"]
     alice_ts = next(iter(bob_dm.by_ts))
     check("AI  sidebar shows the Assistant row and the user count",
@@ -226,14 +240,15 @@ def main():
     bob.notebook.select(bob_dm)
     wait_until(root, lambda: False, timeout=0.3)
 
-    def click_link():
-        """A real click on the (first) link in bob's tab: the Translate link, or the Try again link."""
-        x, y, *_ = bob_dm.window.bbox(bob_dm.window.tag_ranges("link")[0])
-        bob_dm.window.event_generate("<Motion>", x=x + 3, y=y + 3)     # Tk decides which tag is under the mouse on Motion
-        bob_dm.window.event_generate("<Button-1>", x=x + 3, y=y + 3)
+    def click(tab, tag):
+        """A real click on the first thing tagged `tag` in a tab: the Translate link, the Analyze mood
+        button, or a "Try again" note. The tab must be the one on screen."""
+        x, y, *_ = tab.window.bbox(tab.window.tag_ranges(tag)[0])
+        tab.window.event_generate("<Motion>", x=x + 3, y=y + 3)        # Tk decides which tag is under the mouse on Motion
+        tab.window.event_generate("<Button-1>", x=x + 3, y=y + 3)
 
     # Translation: a real click, a real TRANSLATE to the server, and a fake translator in place of Gemini.
-    click_link()
+    click(bob_dm, "link")
     check("AI  clicking Translate shows the translation under the message",
           wait_until(root, lambda: "Translated · Thai → English" in text_of(bob_dm) and "[en] " in text_of(bob_dm)))
     check("AI  the Translate link is replaced by the result", not bob_dm.window.tag_ranges("link"))
@@ -245,16 +260,29 @@ def main():
           wait_until(root, lambda: "Couldn't translate this message." in text_of(bob_dm) and bool(bob_dm.window.tag_ranges("link")))
           and not any(p[1] == "AI_FAILED" for p in popups))
     bob_dm.language_box.current(0)                                     # back to English
-    click_link()                                                       # click Try again
+    click(bob_dm, "link")                                              # click Try again
     check("AI  Try again works", wait_until(root, lambda: "Translated · Thai → English" in text_of(bob_dm))
           and "Couldn't translate" not in text_of(bob_dm))
 
-    bob_dm.analyze(alice_ts)
-    check("AI  Analyze mood without a feature shows a notice", "Mood analysis isn't available yet." in text_of(bob_dm))
-    bob_dm.show_mood_pending(alice_ts)
-    check("AI  'Analyzing…' replaces the button", "Analyzing…" in text_of(bob_dm) and not bob_dm.window.tag_ranges("mood_button"))
-    bob_dm.set_mood(alice_ts, "positive")
-    check("AI  mood pill replaces the button", "● Positive" in text_of(bob_dm) and bool(bob_dm.window.tag_ranges("mood_positive")))
+    # Sentiment: a real click on Analyze mood, a real SENTIMENT to the server, and a fake analyzer in place of Gemini.
+    click(bob_dm, "mood_button")                                       # the private message's button
+    check("AI  clicking Analyze mood shows a mood pill under the message",
+          wait_until(root, lambda: "● Positive" in text_of(bob_dm) and bool(bob_dm.window.tag_ranges("mood_positive"))))
+    check("AI  the mood is private to bob",
+          "● Positive" not in text_of(dm) and not any(m["type"] == SENTIMENT_RESULT for m in raw_messages(carol)))
+    # The failure path, in bob's group tab: the fake analyzer fails once for the group message, then works.
+    bob_group = bob.rooms["group:net lab"]
+    group_message = server.buffer.recent("group:net lab", limit=None)[0]
+    FAIL_ONCE.add(group_message["text"])
+    bob.notebook.select(bob_group)
+    wait_until(root, lambda: False, timeout=0.3)
+    bob_group.analyze(group_message["ts"])
+    check("AI  a failed analysis brings the button back with a note, not a pop-up",
+          wait_until(root, lambda: "Couldn't analyze" in text_of(bob_group)) and not any(p[1] == "AI_FAILED" for p in popups))
+    click(bob_group, "mood_error")                                     # click the "Try again" note
+    check("AI  Try again on a failed mood analysis works",
+          wait_until(root, lambda: "Couldn't analyze" not in text_of(bob_group) and "● Positive" in text_of(bob_group)))
+    bob.notebook.select(bob_dm)
     bot = alice.open_bot()
     check("AI  AI Assistant tab opens", alice.bot_tab is bot and alice.notebook.select() == str(bot))
     bot.entry.insert(0, "what is TCP?")
