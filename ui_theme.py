@@ -134,6 +134,7 @@ def rounded_image(master, radius, fill, border=None, border_width=1, extra=None)
     return image
 
 
+TAB_CHARS = 14            # every tab label is this many characters wide, like the tabs of a web browser
 _SKIN_IMAGES = []       # Tk draws an image only while Python holds a reference to it
 
 # Button looks: style name -> (fill, hover fill, pressed fill, border, text, disabled fill, disabled border,
@@ -196,6 +197,23 @@ def build_skin(style, master):
                          height=round(44 * scale), sticky="nsew")
     style.layout("TEntry", [("Skin.entry", {"sticky": "nsew", "children": [
         ("Entry.padding", {"sticky": "nsew", "children": [("Entry.textarea", {"sticky": "nsew"})]})]})])
+    # Browser-style tabs: every tab has a small x after its label (grey, darker while the pointer is over the tab).
+    size = round(10 * scale)
+    crosses = []
+    for colour in ("#94A3B8", INK):
+        cross = tk.PhotoImage(master=master, width=size, height=size)
+        for i in range(1, size - 3):                       # two diagonal strokes, 2 px thick
+            cross.put(colour, to=(i, i, i + 2, i + 2))
+            cross.put(colour, to=(size - 3 - i, i, size - 1 - i, i + 2))
+        crosses.append(cross)
+    _SKIN_IMAGES.extend(crosses)
+    style.element_create("Tab.close", "image", crosses[0], ("active", crosses[1]), ("selected", crosses[1]),
+                         padding=(round(8 * scale), 0, 0, 0), sticky="")
+    style.layout("TNotebook.Tab", [("Notebook.tab", {"sticky": "nswe", "children": [
+        ("Notebook.padding", {"side": "top", "sticky": "nswe", "children": [
+            ("Notebook.focus", {"side": "top", "sticky": "nswe", "children": [
+                ("Notebook.label", {"side": "left", "sticky": ""}),
+                ("Tab.close", {"side": "left", "sticky": ""})]})]})]})])
     # The same field with a red 2 px outline, for a login error (the name is taken).
     wrong = rounded_image(master, radius, SURFACE, ERROR_COLOR, 2)
     _SKIN_IMAGES.append(wrong)
@@ -250,8 +268,8 @@ def apply_theme(root):
               selectforeground=[("readonly", INK)], bordercolor=[("focus", BLUE)])
     style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
     # Tabs: the idle ones have no fill and grey bold text; the open one is white with ink text and a 1 px border.
-    style.configure("TNotebook.Tab", background=BG, foreground=GRAY, padding=(20, 11), borderwidth=1, font=BOLD,
-                    bordercolor=BG, lightcolor=BG, darkcolor=BG)
+    style.configure("TNotebook.Tab", background=BG, foreground=GRAY, padding=(14, 11), borderwidth=1, font=BOLD,
+                    width=TAB_CHARS, anchor="center", bordercolor=BG, lightcolor=BG, darkcolor=BG)
     style.map("TNotebook.Tab", background=[("selected", SURFACE), ("active", "#E7ECF3")],
               foreground=[("selected", INK), ("active", INK)],
               bordercolor=[("selected", LINE)], lightcolor=[("selected", SURFACE)], darkcolor=[("selected", LINE)])

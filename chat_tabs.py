@@ -3,6 +3,7 @@ chat window with all its text styles. They only draw things and call the callbac
 the networking is in client.py (ChatApp)."""
 
 import base64
+import io
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -14,7 +15,11 @@ from ui_theme import (
 from ui_widgets import make_avatar, make_square_icon
 
 
-IMAGE_TYPES = (".png", ".gif")   # Tk can draw these without extra libraries (no JPEG: that needs Pillow)
+try:                             # Pillow is optional: with it JPEG (and every other common format) shows as a preview too
+    from PIL import Image, ImageTk
+except ImportError:
+    Image = ImageTk = None
+IMAGE_TYPES = (".png", ".gif") + ((".jpg", ".jpeg", ".bmp", ".webp") if Image else ())    # plain Tk reads only PNG and GIF
 PREVIEW_PX = 320        # an image preview is shrunk until it is at most this wide
 
 # Targets offered by the "Translate to" picker: (code sent to the server, name shown in the picker).
@@ -446,11 +451,16 @@ class RoomTab(Bubbles, ttk.Frame):
         """Draw an image inside the chat window, shrunk to fit. If Tk can't read it, show nothing here
         (the file still appears above as a normal file card with a Save button)."""
         try:
-            image = tk.PhotoImage(data=data)            # Tk decodes the base64 PNG/GIF itself
-            shrink = -(-max(image.width(), image.height()) // PREVIEW_PX)    # whole-number divisor, rounded up
-            if shrink > 1:
-                image = image.subsample(shrink)
-        except tk.TclError:
+            if Image is not None:                       # Pillow: any format, and a smooth shrink
+                picture = Image.open(io.BytesIO(base64.b64decode(data)))
+                picture.thumbnail((PREVIEW_PX, PREVIEW_PX))
+                image = ImageTk.PhotoImage(picture.convert("RGBA"), master=self.window)
+            else:
+                image = tk.PhotoImage(data=data)        # Tk decodes the base64 PNG/GIF itself
+                shrink = -(-max(image.width(), image.height()) // PREVIEW_PX)    # whole-number divisor, rounded up
+                if shrink > 1:
+                    image = image.subsample(shrink)
+        except (tk.TclError, OSError, ValueError):
             return
         self.images.append(image)                       # keep a reference, or Tk would erase the picture
         _KEEP_ALIVE.append(image)

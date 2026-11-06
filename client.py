@@ -31,7 +31,7 @@ from protocol import (
 from ui_theme import (
     apply_theme, BG, BLUE, BLUE_DARK, BOLD, ERROR_COLOR, FONT, GRAY, HEAD_FONT, INK, ONLINE, SECTION_FONT,
     SIDEBAR, SIDEBAR_LINE, SIDEBAR_MUTED, SIDEBAR_SEL, SIDEBAR_TEXT, SMALL, SMALL_BOLD, TITLE_FONT,
-    ui_scale, VIOLET, VIOLET_DARK,
+    TAB_CHARS, ui_scale, VIOLET, VIOLET_DARK,
 )
 from ui_widgets import make_avatar, make_dot, make_square_icon, SidebarRow
 from chat_tabs import BotTab, format_size, RoomTab
@@ -292,6 +292,10 @@ class ChatApp:
             card.bind("<Configure>", lambda event, label=text_label: label.configure(wraplength=max(event.width - 130, 200)))
         self.notebook.add(welcome, text="Welcome")
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+        self.notebook.bind("<ButtonPress-1>", self.on_tab_press)
+        self.notebook.bind("<ButtonRelease-1>", self.on_tab_release)
+        self.notebook.bind("<ButtonRelease-2>", self.on_tab_middle_click)     # middle click closes a tab, as in a browser
+        self.pressed_close = None           # the tab whose x is being pressed
 
     def section_label(self, parent, text):
         """A small capitalised heading in the sidebar, e.g. "ONLINE · 2". Returns the label so its count can change."""
@@ -577,7 +581,7 @@ class ChatApp:
                 title=heading or title, subtitle=subtitle,
                 on_file=lambda path: self.send_file(room, path), icon=icon, on_leave=on_leave,
                 placeholder=f"Message {title}")
-            self.notebook.add(self.rooms[room], text=title)
+            self.notebook.add(self.rooms[room], text=self.tab_title(title))
             self.request_history(room)
         if select:
             self.notebook.select(self.rooms[room])
@@ -616,11 +620,54 @@ class ChatApp:
             self.bot_tab.entry.focus_set()
         return self.bot_tab
 
+    def tab_title(self, text):
+        """A tab label that fits the fixed tab width."""
+        return text if len(text) <= TAB_CHARS else text[:TAB_CHARS - 1] + "…"
+
+    def tab_at(self, event):
+        """(index of the tab under the pointer, what part of it) or (None, "")."""
+        part = self.notebook.identify(event.x, event.y)
+        if not part:
+            return None, ""
+        try:
+            return self.notebook.index(f"@{event.x},{event.y}"), part
+        except tk.TclError:
+            return None, ""
+
+    def on_tab_press(self, event):
+        index, part = self.tab_at(event)
+        self.pressed_close = index if part == "close" else None
+
+    def on_tab_release(self, event):
+        """Releasing the mouse on the x that was pressed closes that tab."""
+        index, part = self.tab_at(event)
+        if part == "close" and index is not None and index == self.pressed_close:
+            self.close_tab(self.notebook.nametowidget(self.notebook.tabs()[index]))
+        self.pressed_close = None
+
+    def on_tab_middle_click(self, event):
+        index, part = self.tab_at(event)
+        if index is not None:
+            self.close_tab(self.notebook.nametowidget(self.notebook.tabs()[index]))
+
+    def close_tab(self, tab):
+        """Close one tab. A chat tab only closes the window: you stay in the group, and a new message or a
+        double-click in the sidebar opens it again. The Welcome tab and the assistant tab just go away."""
+        for room, room_tab in list(self.rooms.items()):
+            if room_tab is tab:
+                return self.close_room(room)
+        if tab is self.bot_tab:
+            self.bot_tab = None
+        self.notebook.forget(tab)
+        tab.destroy()
+
     def close_room(self, room):
         tab = self.rooms.pop(room, None)
         if tab is not None:
             self.notebook.forget(tab)
             tab.destroy()
+        if self.last_room == room:
+            self.last_room = None
         self.waiting.pop(room, None)
         if self.unread.pop(room, None):
             self.show_unread()
@@ -709,7 +756,7 @@ class ChatApp:
         self.draw_groups()
         for room, tab in self.rooms.items():
             title = f"@{dm_partner(room, self.me)}" if room.startswith("dm:") else f"#{room.removeprefix('group:')}"
-            self.notebook.tab(tab, text=title + self.badge(room))
+            self.notebook.tab(tab, text=self.tab_title(title + self.badge(room)))
 
     def badge(self, room):
         """" (3)" if the room has 3 unread messages, else ""."""
