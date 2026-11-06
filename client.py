@@ -112,7 +112,7 @@ def _rgb(color):
 _IMAGE_CACHE = {}       # (radius, fill, border, border_width, extra) -> (Tk interpreter, PhotoImage)
 
 
-def rounded_image(master, radius, fill, border=None, border_width=1, extra=4):
+def rounded_image(master, radius, fill, border=None, border_width=1, extra=24):
     """A small rounded rectangle with soft (anti-aliased) edges, as a PhotoImage. ttk keeps its four corners
     and stretches the middle, so this one image becomes a button or text field of any size. The outside is
     transparent, so the colour behind the widget shows around the corners. With extra=0 the image is exactly
@@ -561,12 +561,15 @@ def add_avatar(window, name, kind, *tags):
     window.configure(state="disabled")
 
 
-def append_text(window, text, *tags):
-    """Add text at the end of a chat window and scroll to it. `tags` may contain None (ignored)."""
+def append_text(window, text, *tags, scroll=True):
+    """Add text at the end of a chat window, and by default scroll to it. `tags` may contain None (ignored).
+    Scrolling forces Tk to measure the text, which is slow, so pass scroll=False for the pieces of a message
+    that is written in several parts, and scroll once when it is complete."""
     window.configure(state="normal")
     window.insert("end", text, tuple(tag for tag in tags if tag))
     window.configure(state="disabled")
-    window.see("end")                       # auto-scroll to the newest line
+    if scroll:
+        window.see("end")                   # auto-scroll to the newest line
 
 
 class RoomTab(ttk.Frame):
@@ -675,12 +678,12 @@ class RoomTab(ttk.Frame):
         self.by_ts[ts] = number
         stamp = time.strftime("%H:%M", time.localtime(ts))
         add_avatar(self.window, sender, "me" if mine else "other", "header", row)
-        self.append(sender, row, "header", "me" if mine else "other")
-        self.append(f"  {stamp}", row, "stamp")
-        self.append("\t", row)                                  # the tab pushes the mood button to the right edge
+        self.write(sender, row, "header", "me" if mine else "other")
+        self.write(f"  {stamp}", row, "stamp")
+        self.write("\t", row)                                   # the tab pushes the mood button to the right edge
         self.insert_slot("end", number, "mood", [("✦ Analyze mood", ("mood_button",))])
-        self.append("\n", row)
-        self.append(text + "\n", row, "body")
+        self.write("\n", row)
+        self.write(text + "\n", row, "body")
         if not mine:
             self.insert_slot("end", number, "tr", [("Translate", ("link", "body")), ("\n", ())])
         self.window.see("end")
@@ -695,21 +698,21 @@ class RoomTab(ttk.Frame):
         self.by_ts[ts] = number
         stamp = time.strftime("%H:%M", time.localtime(ts))
         add_avatar(self.window, sender, "me" if mine else "other", "header", row)
-        self.append(sender, row, "header", "me" if mine else "other")
-        self.append(f"  {stamp}\n", row, "stamp")
+        self.write(sender, row, "header", "me" if mine else "other")
+        self.write(f"  {stamp}\n", row, "stamp")
         if data is None:                    # from history: no bytes, so no preview and no Save link
-            self.append(f"📎 {filename} ({format_size(size)})", row, "file_line")
-            self.append(" — sent earlier, not stored on the server\n", row, "note")
+            self.write(f"📎 {filename} ({format_size(size)})", row, "file_line")
+            self.write(" — sent earlier, not stored on the server\n", row, "note")
             self.window.see("end")
             return
         if filename.lower().endswith(IMAGE_TYPES):
             self.add_preview(data, row)
-        self.append(f"📎 {filename}", row, "file_line")
-        self.append(f"  ·  {format_size(size)}", row, "stamp")
+        self.write(f"📎 {filename}", row, "file_line")
+        self.write(f"  ·  {format_size(size)}", row, "stamp")
         self.files[number] = (filename, data)
-        self.append("  ·  ", row, "stamp")
+        self.write("  ·  ", row, "stamp")
         self.insert_slot("end", number, "save", [("Save as…", ("link", "file_save"))])
-        self.append("\n", row)
+        self.write("\n", row)
         self.window.see("end")
 
     def add_preview(self, data, row):
@@ -862,6 +865,10 @@ class RoomTab(ttk.Frame):
 
     def append(self, text, *tags):
         append_text(self.window, text, *tags)
+
+    def write(self, text, *tags):
+        """Append text without scrolling: a message is written in several pieces and scrolls once, at its end."""
+        append_text(self.window, text, *tags, scroll=False)
 
 
 class BotTab(ttk.Frame):
