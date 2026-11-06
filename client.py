@@ -14,12 +14,15 @@ thread sending while another is blocked in recv() on the same socket is safe.
 
 import argparse
 import base64
+import math
 import os
 import queue
 import socket
+import struct
 import threading
 import time
 import tkinter as tk
+import zlib
 from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 
 from protocol import (
@@ -35,17 +38,29 @@ IMAGE_TYPES = (".png", ".gif")   # Tk can draw these without extra libraries (no
 PREVIEW_PX = 320        # an image preview is shrunk until it is at most this wide
 
 # Colours. The whole window uses one light palette (apply_theme), even when the OS is in dark mode, so it
-# looks the same on every machine and the tinted AI blocks stay readable. Violet means "AI feature".
-INK, GRAY, BLUE, GREEN = "#1B2430", "#5B6678", "#1F5FD1", "#17663F"
-VIOLET, VIOLET_DARK, VIOLET_TINT, VIOLET_LIGHT = "#5B3FC4", "#4B30AB", "#EFEAFB", "#F5F2FD"
-BG, LINE, SELECTED = "#EEF1F5", "#D5DBE3", "#E6EEFC"       # window background, borders, selected list row
-FONT = ("Segoe UI", 10)
-BOLD = ("Segoe UI", 10, "bold")
-ITALIC = ("Segoe UI", 10, "italic")
-SMALL = ("Segoe UI", 9)
-SMALL_BOLD = ("Segoe UI", 9, "bold")
-SMALL_ITALIC = ("Segoe UI", 9, "italic")
-HEAD_FONT = ("Segoe UI", 12, "bold")
+# looks the same on every machine and the tinted AI blocks stay readable. Blue is the main accent and
+# violet means "AI feature". Greys are the "slate" scale, which looks cleaner than pure grey.
+INK, GRAY, BLUE, GREEN = "#0F172A", "#64748B", "#2563EB", "#0F766E"
+BLUE_DARK, BLUE_TINT = "#1D4ED8", "#EFF6FF"
+VIOLET, VIOLET_DARK, VIOLET_TINT, VIOLET_LIGHT = "#7C3AED", "#6D28D9", "#F3EEFF", "#FAF7FF"
+BG, LINE, SELECTED = "#F1F5F9", "#E2E8F0", "#DBEAFE"       # window background, borders, selected list row
+SURFACE = "#FFFFFF"                                         # cards: the sidebar, chat area, inputs
+FONT = ("Segoe UI", 11)
+BOLD = ("Segoe UI", 11, "bold")
+ITALIC = ("Segoe UI", 11, "italic")
+SMALL = ("Segoe UI", 10)
+SMALL_BOLD = ("Segoe UI", 10, "bold")
+SMALL_ITALIC = ("Segoe UI", 10, "italic")
+HEAD_FONT = ("Segoe UI", 15, "bold")
+TITLE_FONT = ("Segoe UI", 26, "bold")
+AVATAR_COLORS = ["#0EA5E9", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899", "#14B8A6", "#6366F1"]
+
+# The tip cards on the Welcome tab: (icon, icon colour, title, help text).
+WELCOME_TIPS = [("💬", "#2563EB", "Private chat", "Double-click a name under Online users."),
+                ("👥", "#0EA5E9", "Group chat", "Create a group, or select one and press Join. Double-click a group you are in to open it."),
+                ("✦", "#7C3AED", "AI Assistant", "Double-click AI Assistant in the sidebar to ask the chatbot."),
+                ("⚡", "#F59E0B", "AI tools", "In any chat: summarize the room, translate a message, or analyze its mood."),
+                ("📎", "#10B981", "Files and images", "Use Attach to send a file or an image up to 5 MiB.")]
 
 # Targets offered by the "Translate to" picker: (code sent to the server, name shown in the picker).
 LANGUAGE_CHOICES = [("en", "English"), ("th", "ไทย (Thai)"), ("ja", "日本語 (Japanese)"),
@@ -58,51 +73,165 @@ MOODS = {"positive": ("Positive", "#17663F", "#E1F3E8"),
          "negative": ("Negative", "#A5331F", "#FBE6E1")}
 
 
+# ---------------------------------------------------------------------------
+# Look: rounded buttons and fields, drawn in code (standard library only)
+# ---------------------------------------------------------------------------
+
+def _png(width, height, rows):
+    """The bytes of a PNG with transparency, built by hand so no image library is needed.
+    `rows` is a list of rows, each a list of (red, green, blue, alpha) pixels."""
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+    raw = b"".join(b"\x00" + bytes(value for pixel in row for value in pixel) for row in rows)   # filter byte 0 per row
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def _rgb(color):
+    return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def rounded_image(master, radius, fill, border=None, border_width=1):
+    """A small rounded rectangle with soft (anti-aliased) edges, as a PhotoImage. ttk keeps its four corners
+    and stretches the middle, so this one image becomes a button or text field of any size. The outside is
+    transparent, so the colour behind the widget shows around the corners."""
+    size = 2 * radius + 4                       # the four corners (radius + 1 each) plus a 2-pixel strip ttk can stretch
+    half = size / 2
+    fill_rgb, border_rgb = _rgb(fill), _rgb(border or fill)
+
+    def distance(x, y, inset):
+        """How far (x, y) is outside the rounded square shrunk by `inset` pixels (negative = inside it)."""
+        r = max(radius - inset, 0.0)
+        dx, dy = abs(x - half) - (half - inset - r), abs(y - half) - (half - inset - r)
+        return math.hypot(max(dx, 0.0), max(dy, 0.0)) + min(max(dx, dy), 0.0) - r
+
+    rows = []
+    for py in range(size):
+        row = []
+        for px in range(size):
+            x, y = px + 0.5, py + 0.5
+            outer = min(max(0.5 - distance(x, y, 0), 0.0), 1.0)      # 1 inside the shape, 0 outside, soft in between
+            inner = min(max(0.5 - distance(x, y, border_width), 0.0), 1.0) if border else 1.0
+            rgb = tuple(round(b * (1 - inner) + f * inner) for b, f in zip(border_rgb, fill_rgb))
+            row.append((*rgb, round(255 * outer)))
+        rows.append(row)
+    return tk.PhotoImage(master=master, data=base64.b64encode(_png(size, size, rows)).decode("ascii"))
+
+
+_SKIN_IMAGES = []       # Tk draws an image only while Python holds a reference to it
+
+# Button looks: style name -> (fill, hover fill, pressed fill, border, text, disabled fill, disabled border,
+# disabled text, padding). Primary (blue) is for Send/Connect, AI (violet) for AI actions.
+BUTTON_LOOKS = {
+    "TButton": (SURFACE, "#F1F5F9", "#E2E8F0", "#CBD5E1", INK, "#F8FAFC", "#E2E8F0", "#94A3B8", (12, 8)),
+    "Primary.TButton": (BLUE, BLUE_DARK, "#1E40AF", None, "#FFFFFF", "#93C5FD", None, "#FFFFFF", (14, 8)),
+    "AI.TButton": (VIOLET, VIOLET_DARK, "#5B21B6", None, "#FFFFFF", "#C4B5FD", None, "#FFFFFF", (14, 7)),
+    "Chip.TButton": (VIOLET_LIGHT, VIOLET_TINT, "#E9DDFF", "#DDD6FE", "#4C1D95", "#F8FAFC", "#E2E8F0", "#94A3B8", (12, 5)),
+    "Danger.TButton": (SURFACE, "#FEF2F2", "#FEE2E2", "#FCA5A5", "#B91C1C", "#F8FAFC", "#E2E8F0", "#94A3B8", (12, 8)),
+}
+
+
+def ui_scale(widget):
+    """1.0 at 100 % Windows display scaling, 1.25 at 125 %, and so on."""
+    return max(widget.winfo_fpixels("1i") / 96, 1.0)
+
+
+def build_skin(style, master):
+    """Draw the rounded buttons and text fields once, as ttk image elements. The look and the layout of
+    each ttk widget stay the same, so buttons still have .state(), .instate() and .invoke() as before."""
+    if "Skin.TButton" in style.element_names():
+        return                                  # already built for this window system
+    radius = round(9 * ui_scale(master))
+    for name, (fill, hover, pressed, border, text, off_fill, off_border, off_text, padding) in BUTTON_LOOKS.items():
+        normal, active, down, disabled = (rounded_image(master, radius, f, b) for f, b in (
+            (fill, border), (hover, border), (pressed, border), (off_fill, off_border)))
+        _SKIN_IMAGES.extend((normal, active, down, disabled))
+        style.element_create(f"Skin.{name}", "image", normal, ("disabled", disabled), ("pressed", down),
+                             ("active", active), border=radius + 1, sticky="nsew")
+        style.layout(name, [(f"Skin.{name}", {"sticky": "nsew", "children": [
+            ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
+        style.configure(name, foreground=text, padding=padding, anchor="center",
+                        font=FONT if name in ("TButton", "Danger.TButton") else BOLD)
+        style.map(name, foreground=[("disabled", off_text)])
+
+    field, focused, off = (rounded_image(master, radius, f, b, w) for f, b, w in (
+        (SURFACE, "#CBD5E1", 1), (SURFACE, BLUE, 2), ("#F8FAFC", "#E2E8F0", 1)))
+    _SKIN_IMAGES.extend((field, focused, off))
+    style.element_create("Skin.entry", "image", field, ("disabled", off), ("focus", focused),
+                         border=radius + 1, sticky="nsew")
+    style.layout("TEntry", [("Skin.entry", {"sticky": "nsew", "children": [
+        ("Entry.padding", {"sticky": "nsew", "children": [("Entry.textarea", {"sticky": "nsew"})]})]})])
+    # The language drop-down gets the same rounded field, with its arrow on the right.
+    style.layout("TCombobox", [("Skin.entry", {"sticky": "nsew", "children": [
+        ("Combobox.downarrow", {"side": "right", "sticky": "ns"}),
+        ("Combobox.padding", {"expand": "1", "sticky": "nsew", "children": [("Combobox.textarea", {"sticky": "nsew"})]})]})])
+
+
 def apply_theme(root):
-    """Give every ttk widget the light look of the design. The "clam" theme is used because the native
-    macOS/Windows themes ignore most colour settings (buttons would stay grey)."""
+    """Give every ttk widget the modern light look. The "clam" theme is the base because the native
+    macOS/Windows themes ignore most colour settings; on top of it the buttons and fields get rounded corners."""
     root.configure(bg=BG)
+    root.option_add("*TEntry.font", FONT)        # text fields use the same font as everything else
+    root.option_add("*Entry.font", FONT)
+    root.option_add("*TCombobox*Font", FONT)     # the language picker and its drop-down list
     style = ttk.Style(root)
     style.theme_use("clam")
-    style.configure(".", background=BG, foreground=INK, font=FONT, bordercolor="#C3CBD6",
+    style.configure(".", background=BG, foreground=INK, font=FONT, bordercolor=LINE,
                     lightcolor=BG, darkcolor=BG, troughcolor=BG, focuscolor=BG)
     style.configure("TFrame", background=BG)
-    style.configure("White.TFrame", background="#FFFFFF")
+    style.configure("White.TFrame", background=SURFACE)
     style.configure("TLabel", background=BG)
-    style.configure("White.TLabel", background="#FFFFFF")
-    style.configure("Section.TLabel", background="#FFFFFF", foreground=GRAY, font=SMALL_BOLD)
+    style.configure("White.TLabel", background=SURFACE)
+    style.configure("Section.TLabel", background=SURFACE, foreground=GRAY, font=SMALL_BOLD)
     style.configure("TPanedwindow", background=BG)
-    # Buttons: white with a grey border; Primary (blue) is for Send/Connect, AI (violet) for AI actions.
-    # relief="solid" is what draws the visible border (a flat clam button has none, so white-on-white vanishes).
-    style.configure("TButton", background="#FFFFFF", foreground=INK, padding=(12, 5), relief="solid", borderwidth=1,
-                    bordercolor="#9AA5B5", lightcolor="#FFFFFF", darkcolor="#FFFFFF")
-    style.map("TButton", background=[("disabled", BG), ("active", "#E6EAF0")], foreground=[("disabled", "#9AA3B2")],
-              bordercolor=[("disabled", "#C3CBD6"), ("active", "#6B778A")])
-    for name, color, hover, off in (("Primary", BLUE, "#1A52B8", "#9DB8E8"), ("AI", VIOLET, VIOLET_DARK, "#BBAEE6")):
-        style.configure(f"{name}.TButton", background=color, foreground="#FFFFFF", bordercolor=color,
-                        lightcolor=color, darkcolor=color)
-        style.map(f"{name}.TButton", background=[("disabled", off), ("active", hover)],
-                  foreground=[("disabled", "#FFFFFF")], bordercolor=[("disabled", off), ("active", hover)])
-    style.configure("Chip.TButton", background=VIOLET_LIGHT, foreground="#2F2160", bordercolor=VIOLET, padding=(10, 3),
-                    lightcolor=VIOLET_LIGHT, darkcolor=VIOLET_LIGHT)
-    style.map("Chip.TButton", background=[("disabled", BG), ("active", VIOLET_TINT)], bordercolor=[("disabled", "#C3CBD6")])
-    style.configure("TEntry", fieldbackground="#FFFFFF", padding=6, insertcolor=INK, lightcolor="#FFFFFF", darkcolor="#FFFFFF")
-    style.configure("TCombobox", fieldbackground="#FFFFFF", background="#FFFFFF", foreground=INK, arrowcolor=VIOLET_DARK,
-                    padding=4, lightcolor="#FFFFFF", darkcolor="#FFFFFF")
-    style.map("TCombobox", fieldbackground=[("readonly", "#FFFFFF")], selectbackground=[("readonly", "#FFFFFF")],
-              selectforeground=[("readonly", INK)])
-    style.configure("TNotebook", background=BG, borderwidth=0)
-    style.configure("TNotebook.Tab", background=BG, foreground="#4A5568", padding=(16, 7), borderwidth=1)
-    style.map("TNotebook.Tab", background=[("selected", "#FFFFFF")], foreground=[("selected", INK)])
-    style.configure("Treeview", background="#FFFFFF", fieldbackground="#FFFFFF", foreground=INK, borderwidth=1)
+    style.configure("Sash", sashthickness=8, gripcount=0, background=BG)
+    build_skin(style, root)
+    style.configure("TEntry", fieldbackground=SURFACE, padding=(10, 7), foreground=INK, insertcolor=INK, font=FONT)
+    style.map("TEntry", fieldbackground=[("disabled", "#F8FAFC")])
+    style.configure("TCombobox", fieldbackground=SURFACE, background=SURFACE, foreground=INK, arrowcolor=VIOLET_DARK,
+                    bordercolor="#CBD5E1", padding=5, lightcolor=SURFACE, darkcolor=SURFACE)
+    style.map("TCombobox", fieldbackground=[("readonly", SURFACE)], selectbackground=[("readonly", SURFACE)],
+              selectforeground=[("readonly", INK)], bordercolor=[("focus", BLUE)])
+    style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
+    style.configure("TNotebook.Tab", background=BG, foreground=GRAY, padding=(20, 11), borderwidth=0, font=BOLD)
+    style.map("TNotebook.Tab", background=[("selected", SURFACE), ("active", "#E7ECF3")],
+              foreground=[("selected", INK), ("active", INK)])
+    # Lists: no frame, taller rows, a soft blue selection.
+    style.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+    style.configure("Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=INK, borderwidth=0)
     style.map("Treeview", background=[("selected", SELECTED)], foreground=[("selected", INK)])
+    # Scroll bars: a thin rounded-looking thumb with no arrow buttons.
+    style.layout("Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+        ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})]})])
+    style.configure("Vertical.TScrollbar", troughcolor=SURFACE, background="#CBD5E1", bordercolor=SURFACE,
+                    lightcolor="#CBD5E1", darkcolor="#CBD5E1", gripcount=0, width=10)
+    style.map("Vertical.TScrollbar", background=[("active", "#94A3B8")], lightcolor=[("active", "#94A3B8")],
+              darkcolor=[("active", "#94A3B8")])
+
+
+def avatar_color(name):
+    """The same name always gets the same colour."""
+    return AVATAR_COLORS[sum(map(ord, name)) % len(AVATAR_COLORS)]
+
+
+def make_avatar(parent, name, background, size=32, color=None, glyph=None):
+    """A round avatar: a coloured circle with the person's initial (or `glyph`), drawn on a canvas."""
+    size = round(size * ui_scale(parent)) // 2 * 2          # an even size, so the circle is centred exactly
+    canvas = tk.Canvas(parent, width=size, height=size, bg=background, highlightthickness=0, borderwidth=0)
+    # A canvas oval has jagged edges; a rounded image with soft edges (the same trick as the buttons) is smooth.
+    canvas.disc = rounded_image(parent, size // 2 - 2, color or avatar_color(name))
+    canvas.create_image(size // 2, size // 2, image=canvas.disc)
+    canvas.create_text(size / 2, size / 2, text=glyph or name[:1].upper(), fill="#FFFFFF",
+                       font=("Segoe UI", max(size // 3, 8), "bold"))
+    return canvas
 
 
 def make_list(parent, **options):
     """A plain list box in the light palette (a tk.Listbox ignores the ttk theme)."""
-    return tk.Listbox(parent, bg="#FFFFFF", fg=INK, font=FONT, selectbackground=SELECTED, selectforeground=INK,
-                      activestyle="none", relief="flat", highlightthickness=1, highlightbackground=LINE,
-                      highlightcolor=LINE, exportselection=False, **options)
+    return tk.Listbox(parent, bg=SURFACE, fg=INK, font=FONT, selectbackground=SELECTED, selectforeground=INK,
+                      activestyle="none", relief="flat", highlightthickness=0, borderwidth=0,
+                      exportselection=False, **options)
 
 
 class LoginFrame(ttk.Frame):
@@ -110,22 +239,35 @@ class LoginFrame(ttk.Frame):
 
     def __init__(self, root, host, port, name, on_success):
         apply_theme(root)
-        super().__init__(root, padding=20)
+        super().__init__(root, style="White.TFrame")
         self.on_success = on_success        # called with (socket, accepted name)
         self.host = tk.StringVar(value=host)
         self.port = tk.StringVar(value=str(port))
         self.name = tk.StringVar(value=name)
 
-        ttk.Label(self, text="Socket Chat", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, columnspan=2, pady=(0, 12))
-        for row, (label, var) in enumerate([("Server host / IP", self.host), ("Port", self.port), ("Your name", self.name)], start=1):
-            ttk.Label(self, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=3)
-            entry = ttk.Entry(self, textvariable=var, width=28)
-            entry.grid(row=row, column=1, pady=3)
+        # Left: a blue brand panel. Right: the form.
+        brand = tk.Frame(self, bg=BLUE, padx=36, pady=40)
+        brand.pack(side="left", fill="y")
+        make_avatar(brand, "Socket Chat", BLUE, size=64, color=BLUE_DARK, glyph="💬").pack(anchor="w")
+        tk.Label(brand, text="Socket Chat", bg=BLUE, fg="#FFFFFF", font=TITLE_FONT).pack(anchor="w", pady=(14, 0))
+        tk.Label(brand, text="Private chats, groups and AI tools,\nover plain TCP sockets.", bg=BLUE, fg="#DBEAFE",
+                 font=FONT, justify="left").pack(anchor="w", pady=(6, 30))
+        for line in ("✦   Summaries, translation and mood", "📎   Share files and images", "💬   History and unread badges"):
+            tk.Label(brand, text=line, bg=BLUE, fg="#FFFFFF", font=FONT, anchor="w").pack(fill="x", pady=5)
+
+        form = ttk.Frame(self, style="White.TFrame", padding=(44, 40))
+        form.pack(side="left", fill="both", expand=True)
+        ttk.Label(form, text="Welcome", style="White.TLabel", font=HEAD_FONT).pack(anchor="w")
+        ttk.Label(form, text="Connect to a chat server", style="White.TLabel", foreground=GRAY).pack(anchor="w")
+        for label, var in (("Server host / IP", self.host), ("Port", self.port), ("Your name", self.name)):
+            ttk.Label(form, text=label, style="White.TLabel", foreground=GRAY, font=SMALL_BOLD).pack(anchor="w", pady=(16, 5))
+            entry = ttk.Entry(form, textvariable=var, width=30)
+            entry.pack(fill="x")
             entry.bind("<Return>", lambda event: self.connect())
         self.name_entry = entry             # the last entry created is the name box
-        self.status = ttk.Label(self, text="", foreground="gray")
-        self.status.grid(row=4, column=0, columnspan=2, pady=(8, 0))
-        ttk.Button(self, text="Connect", style="Primary.TButton", command=self.connect).grid(row=5, column=0, columnspan=2, pady=(8, 0))
+        self.status = ttk.Label(form, text="", style="White.TLabel", foreground=GRAY)
+        self.status.pack(anchor="w", pady=(14, 0))
+        ttk.Button(form, text="Connect", style="Primary.TButton", command=self.connect).pack(fill="x", pady=(8, 0))
         self.name_entry.focus_set()
 
     def connect(self):
@@ -186,30 +328,40 @@ def make_chat_window(parent):
     stay readable. state="disabled" makes it read-only; callers unlock it briefly to append.
     """
     window = scrolledtext.ScrolledText(parent, state="disabled", wrap="word", width=60, height=20, font=FONT,
-                                       bg="#FFFFFF", fg=INK, padx=8, pady=4, relief="flat", highlightthickness=1,
-                                       highlightbackground="#D5DBE3")
+                                       bg=SURFACE, fg=INK, padx=6, pady=8, relief="flat", highlightthickness=0,
+                                       borderwidth=0, spacing2=3)
+    # A thin modern scroll bar instead of the classic one (ScrolledText created its own: swap it).
+    window.vbar.pack_forget()
+    bar = ttk.Scrollbar(window.frame, orient="vertical", command=window.yview)
+    bar.pack(side="right", fill="y")
+    window.configure(yscrollcommand=bar.set)
+    # Messages are laid out like Slack or Discord: an avatar, then the name and time, then the text indented
+    # to line up under the name. `indent` is that avatar column's width (it grows with the display scaling).
+    indent = round(40 * ui_scale(parent))        # = the avatar (30) plus its padding (2 x 5), see add_avatar
+    window.indent = indent
     # Order matters: a tag created later wins when two tags set the same option (e.g. background).
-    window.tag_configure("row_me", background="#EAF1FD")                # your own messages are tinted blue
-    window.tag_configure("row_bot", background=VIOLET_LIGHT)            # assistant answers are tinted violet
-    window.tag_configure("header", spacing1=8)                          # a little air above each message
+    window.tag_configure("row_me", background="#F6F9FF")                # your own messages get a faint blue wash
+    window.tag_configure("row_bot", background=VIOLET_LIGHT)            # assistant answers get a faint violet one
+    window.tag_configure("header", spacing1=16)                         # air above each message
+    window.tag_configure("body", lmargin1=indent, lmargin2=indent)      # the message text lines up under the name
     window.tag_configure("me", foreground=BLUE, font=BOLD)
-    window.tag_configure("other", foreground=GREEN, font=BOLD)
+    window.tag_configure("other", foreground=INK, font=BOLD)
     window.tag_configure("bot", foreground=VIOLET_DARK, font=BOLD)
-    window.tag_configure("stamp", foreground=GRAY, font=SMALL)
-    window.tag_configure("notice", foreground="gray", font=ITALIC)
+    window.tag_configure("stamp", foreground="#94A3B8", font=SMALL)
+    window.tag_configure("notice", foreground=GRAY, font=ITALIC, spacing1=8)
     window.tag_configure("note", foreground=GRAY, font=SMALL_ITALIC)
-    window.tag_configure("file_line", foreground=INK, font=BOLD)
-    window.tag_configure("divider", foreground="#9AA5B5", font=SMALL, justify="center", spacing1=6, spacing3=2)
-    # AI summaries get a tinted, indented block so nobody mistakes them for a chat message.
-    window.tag_configure("summary_title", foreground="#613583", background="#f3eefa",
-                         font=BOLD, lmargin1=8, lmargin2=8, spacing1=6)
-    window.tag_configure("summary", foreground=INK, background="#f3eefa", lmargin1=8, lmargin2=8)
-    window.tag_configure("summary_model", foreground="gray", background="#f3eefa",
-                         font=SMALL_ITALIC, lmargin1=8, lmargin2=8, spacing3=6)
+    window.tag_configure("file_line", foreground=INK, font=BOLD, lmargin1=indent, lmargin2=indent)
+    window.tag_configure("divider", foreground="#94A3B8", font=SMALL, justify="center", spacing1=10, spacing3=4)
+    # AI summaries get a tinted block so nobody mistakes them for a chat message.
+    window.tag_configure("summary_title", foreground=VIOLET_DARK, background=VIOLET_TINT,
+                         font=BOLD, lmargin1=16, lmargin2=16, rmargin=16, spacing1=14)
+    window.tag_configure("summary", foreground=INK, background=VIOLET_TINT, lmargin1=16, lmargin2=16, rmargin=16)
+    window.tag_configure("summary_model", foreground=GRAY, background=VIOLET_TINT,
+                         font=SMALL_ITALIC, lmargin1=16, lmargin2=16, rmargin=16, spacing3=10)
     # Per-message AI controls: clickable text ("link"), the mood button, mood pills and result blocks.
-    block = {"lmargin1": 8, "lmargin2": 8, "rmargin": 8}
-    window.tag_configure("link", foreground=VIOLET_DARK, underline=True, font=SMALL_BOLD)
-    window.tag_configure("mood_button", foreground=VIOLET_DARK, background=VIOLET_LIGHT, font=SMALL_BOLD)
+    block = {"lmargin1": indent, "lmargin2": indent, "rmargin": 12}
+    window.tag_configure("link", foreground=VIOLET, underline=False, font=SMALL_BOLD)
+    window.tag_configure("mood_button", foreground=VIOLET, font=SMALL_BOLD)
     window.tag_configure("mood_error", foreground="#A5331F")
     window.tag_configure("mood_pending", foreground=VIOLET_DARK, font=SMALL_ITALIC)
     for label, (name, color, tint) in MOODS.items():
@@ -237,6 +389,21 @@ def format_size(size):
     return f"{size / 1024 / 1024:.1f} MB"
 
 
+def add_avatar(window, name, kind, *tags):
+    """Put a round avatar at the start of a message header. It becomes one character of the chat text, so it
+    carries the same tags as the header line (spacing, background). `kind` is "me", "other" or "bot"."""
+    background = {"me": "#F6F9FF", "bot": VIOLET_LIGHT}.get(kind, SURFACE)
+    avatar = make_avatar(window, name, background, size=30, color={"me": BLUE, "bot": VIOLET}.get(kind),
+                         glyph="✦" if kind == "bot" else None)
+    window.configure(state="normal")
+    start = window.index("end-1c")
+    window.window_create("end", window=avatar, padx=round(5 * ui_scale(window)), align="center")
+    for tag in tags:
+        if tag:
+            window.tag_add(tag, start)
+    window.configure(state="disabled")
+
+
 def append_text(window, text, *tags):
     """Add text at the end of a chat window and scroll to it. `tags` may contain None (ignored)."""
     window.configure(state="normal")
@@ -255,7 +422,7 @@ class RoomTab(ttk.Frame):
     """
 
     def __init__(self, parent, on_send, on_summarize, on_translate, on_mood, title="", subtitle="", on_file=None):
-        super().__init__(parent, padding=10, style="White.TFrame")
+        super().__init__(parent, padding=(20, 16), style="White.TFrame")
         self.on_send = on_send              # function(text) -> True if the message was sent
         self.on_summarize = on_summarize    # function() -> True if SUMMARIZE was sent
         self.on_translate = on_translate    # function(ts, language code) -> True if the request was sent
@@ -269,23 +436,23 @@ class RoomTab(ttk.Frame):
         # Chat box: Enter or the Send button sends. Packed first (at the bottom) so it
         # never gets squeezed out when the window is small.
         bar = ttk.Frame(self, style="White.TFrame")
-        bar.pack(side="bottom", fill="x", pady=(8, 0))
+        bar.pack(side="bottom", fill="x", pady=(14, 0))
         if on_file is not None:
-            ttk.Button(bar, text="📎 Attach", command=self.attach).pack(side="left", padx=(0, 8))
+            ttk.Button(bar, text="📎 Attach", command=self.attach).pack(side="left", padx=(0, 10))
         self.entry = ttk.Entry(bar)
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Return>", lambda event: self.send())
-        ttk.Button(bar, text="Send", style="Primary.TButton", command=self.send).pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="Send  ➤", style="Primary.TButton", command=self.send).pack(side="left", padx=(10, 0))
 
         head = ttk.Frame(self, style="White.TFrame")
-        head.pack(side="top", fill="x", pady=(0, 8))
+        head.pack(side="top", fill="x", pady=(0, 10))
         ttk.Label(head, text=title, style="White.TLabel", font=HEAD_FONT).pack(anchor="w")
-        self.subtitle = ttk.Label(head, text=subtitle, style="White.TLabel", foreground=GRAY)
-        self.subtitle.pack(anchor="w")
+        self.subtitle = ttk.Label(head, text=subtitle, style="White.TLabel", foreground=GRAY, font=SMALL)
+        self.subtitle.pack(anchor="w", pady=(2, 0))
 
-        # AI strip: everything AI that works on the whole room, in one violet bar.
-        strip = tk.Frame(self, bg=VIOLET_LIGHT, padx=10, pady=6)
-        strip.pack(side="top", fill="x", pady=(0, 8))
+        # AI strip: everything AI that works on the whole room, in one soft violet bar.
+        strip = tk.Frame(self, bg=VIOLET_LIGHT, padx=14, pady=9, highlightthickness=1, highlightbackground="#E9DDFF")
+        strip.pack(side="top", fill="x", pady=(0, 10))
         tk.Label(strip, text="✦ AI tools", bg=VIOLET_LIGHT, fg=VIOLET_DARK, font=BOLD).pack(side="left")
         tk.Label(strip, text="Translate to:", bg=VIOLET_LIGHT, fg=INK, font=FONT).pack(side="left", padx=(14, 4))
         # The picker only chooses the target language; nothing is translated until a message's link is clicked.
@@ -333,14 +500,15 @@ class RoomTab(ttk.Frame):
         self.entries[number] = {"ts": ts, "row": row}
         self.by_ts[ts] = number
         stamp = time.strftime("%H:%M", time.localtime(ts))
+        add_avatar(self.window, sender, "me" if mine else "other", "header", row)
         self.append(sender, row, "header", "me" if mine else "other")
         self.append(f"  {stamp}", row, "stamp")
         self.append("\t", row)                                  # the tab pushes the mood button to the right edge
         self.insert_slot("end", number, "mood", [("✦ Analyze mood", ("mood_button",))])
         self.append("\n", row)
-        self.append(text + "\n", row)
+        self.append(text + "\n", row, "body")
         if not mine:
-            self.insert_slot("end", number, "tr", [("Translate", ("link",)), ("\n", ())])
+            self.insert_slot("end", number, "tr", [("Translate", ("link", "body")), ("\n", ())])
         self.window.see("end")
 
     def add_file(self, sender, filename, size, data, ts, mine):
@@ -352,6 +520,7 @@ class RoomTab(ttk.Frame):
         self.entries[number] = {"ts": ts, "row": row}
         self.by_ts[ts] = number
         stamp = time.strftime("%H:%M", time.localtime(ts))
+        add_avatar(self.window, sender, "me" if mine else "other", "header", row)
         self.append(sender, row, "header", "me" if mine else "other")
         self.append(f"  {stamp}\n", row, "stamp")
         if data is None:                    # from history: no bytes, so no preview and no Save link
@@ -381,7 +550,11 @@ class RoomTab(ttk.Frame):
             return
         self.images.append(image)                       # keep a reference, or Tk would erase the picture
         self.window.configure(state="normal")
-        self.window.image_create("end", image=image, padx=4, pady=4)
+        start = self.window.index("end-1c")
+        self.window.image_create("end", image=image, padx=4, pady=6)
+        self.window.tag_add("body", start)              # line the picture up under the name, like the text
+        if row:
+            self.window.tag_add(row, start)
         self.window.insert("end", "\n", row)
         self.window.configure(state="disabled")
 
@@ -527,29 +700,29 @@ class BotTab(ttk.Frame):
     SUGGESTIONS = [("Explain TCP framing", False), ("Explain my last chat", True), ("Help me write a reply", False)]
 
     def __init__(self, parent, on_ask, on_clear):
-        super().__init__(parent, padding=10, style="White.TFrame")
+        super().__init__(parent, padding=(20, 16), style="White.TFrame")
         self.on_ask = on_ask                # function(text, use_last_chat) -> True if the question was sent
         self.on_clear = on_clear            # function(): tell the server to forget the conversation
         self.waiting = False                # True from "Thinking…" until the answer arrives
 
         bar = ttk.Frame(self, style="White.TFrame")
-        bar.pack(side="bottom", fill="x", pady=(6, 0))
+        bar.pack(side="bottom", fill="x", pady=(10, 0))
         self.entry = ttk.Entry(bar)
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Return>", lambda event: self.ask())
-        self.ask_button = ttk.Button(bar, text="Ask", style="AI.TButton", command=self.ask)
-        self.ask_button.pack(side="left", padx=(8, 0))
+        self.ask_button = ttk.Button(bar, text="Ask  ✦", style="AI.TButton", command=self.ask)
+        self.ask_button.pack(side="left", padx=(10, 0))
 
         chips = ttk.Frame(self, style="White.TFrame")
-        chips.pack(side="bottom", fill="x", pady=(8, 0))
+        chips.pack(side="bottom", fill="x", pady=(12, 0))
         self.chips = []
         for text, use_last_chat in self.SUGGESTIONS:
             chip = ttk.Button(chips, text=text, style="Chip.TButton", command=lambda t=text, c=use_last_chat: self.ask(t, c))
-            chip.pack(side="left", padx=(0, 6))
+            chip.pack(side="left", padx=(0, 8))
             self.chips.append(chip)
 
-        head = tk.Frame(self, bg=VIOLET_LIGHT, padx=10, pady=8)
-        head.pack(side="top", fill="x", pady=(0, 8))
+        head = tk.Frame(self, bg=VIOLET_LIGHT, padx=16, pady=12, highlightthickness=1, highlightbackground="#E9DDFF")
+        head.pack(side="top", fill="x", pady=(0, 10))
         titles = tk.Frame(head, bg=VIOLET_LIGHT)
         titles.pack(side="left")
         tk.Label(titles, text="✦ AI Assistant", bg=VIOLET_LIGHT, fg=VIOLET_DARK, font=HEAD_FONT).pack(anchor="w")
@@ -572,21 +745,23 @@ class BotTab(ttk.Frame):
             self.show_thinking()
 
     def add_question(self, text):
+        add_avatar(self.window, "you", "me", "header", "row_me")
         self.append("you", "header", "row_me", "me")
         self.append(f"  {time.strftime('%H:%M')}\n", "row_me", "stamp")
-        self.append(text + "\n", "row_me")
+        self.append(text + "\n", "row_me", "body")
 
     def show_thinking(self):
         """Show "Thinking…" under the assistant's name and block new questions until the answer arrives."""
         self.set_waiting(True)
+        add_avatar(self.window, "AI", "bot", "header", "row_bot")
         self.append("AI Assistant", "header", "row_bot", "bot")
         self.append(f"  {time.strftime('%H:%M')}\n", "row_bot", "stamp")
-        self.append("Thinking…\n", "row_bot", "thinking")
+        self.append("Thinking…\n", "row_bot", "thinking", "body")
 
     def add_reply(self, text, model):
         """Replace "Thinking…" with the assistant's answer."""
-        self.replace_thinking([(text.strip() + "\n", ("row_bot",))] +
-                              ([("Offline reply · no AI was used\n", ("row_bot", "note"))] if model == "offline" else []))
+        self.replace_thinking([(text.strip() + "\n", ("row_bot", "body"))] +
+                              ([("Offline reply · no AI was used\n", ("row_bot", "note", "body"))] if model == "offline" else []))
 
     def failed(self, text="Couldn't get an answer. Try again."):
         """Replace "Thinking…" with a red error block."""
@@ -636,7 +811,7 @@ def fit_to_screen(root):
     width, height = min(round(1100 * scale), max_width), min(round(700 * scale), max_height)
     root.geometry(f"{width}x{height}")
     # The minimum keeps the AI tools strip (Translate to + Summarize chat) fully visible next to the sidebar.
-    root.minsize(min(round(880 * scale), width), min(round(480 * scale), height))
+    root.minsize(min(round(980 * scale), width), min(round(480 * scale), height))
 
 
 class ChatApp:
@@ -671,51 +846,68 @@ class ChatApp:
         """Left: users and groups. Right: a notebook with one tab per room."""
         # Treeview rows don't grow with the font on high-DPI screens, which clips letters like "y".
         line = tkfont.nametofont("TkDefaultFont").metrics("linespace")
-        ttk.Style().configure("Treeview", rowheight=line + 4)
+        ttk.Style().configure("Treeview", rowheight=line + 10)
         panes = ttk.PanedWindow(self.root, orient="horizontal")
-        panes.pack(fill="both", expand=True, padx=6, pady=6)
+        panes.pack(fill="both", expand=True, padx=14, pady=14)
 
-        side = ttk.Frame(panes, style="White.TFrame", padding=14, width=300)
-        ttk.Label(side, text=self.me, style="White.TLabel", font=HEAD_FONT).pack(anchor="w")
-        self.status_label = ttk.Label(side, text=f"● Connected · {self.server_address()}", style="White.TLabel",
-                                      foreground="#2E9E5B")
-        self.status_label.pack(anchor="w", pady=(0, 14))
+        side = ttk.Frame(panes, style="White.TFrame", padding=(18, 18), width=round(364 * ui_scale(self.root)))
+        side.pack_propagate(False)          # a fixed width: the long section titles must not widen the sidebar
+        # Profile header: a round avatar with your initial, your name and the connection status.
+        header = ttk.Frame(side, style="White.TFrame")
+        header.pack(fill="x", pady=(0, 18))
+        make_avatar(header, self.me, SURFACE, size=46, color=BLUE).pack(side="left", padx=(0, 12))
+        who = ttk.Frame(header, style="White.TFrame")
+        who.pack(side="left")
+        ttk.Label(who, text=self.me, style="White.TLabel", font=HEAD_FONT).pack(anchor="w")
+        self.status_label = ttk.Label(who, text=f"● Connected · {self.server_address()}", style="White.TLabel",
+                                      foreground="#16A34A", font=SMALL)
+        self.status_label.pack(anchor="w")
 
         ttk.Label(side, text="ASSISTANT (DOUBLE-CLICK TO OPEN)", style="Section.TLabel").pack(anchor="w")
         self.assistant_list = make_list(side, height=1)
         self.assistant_list.insert("end", "✦ AI Assistant  [BOT]")
-        self.assistant_list.pack(fill="x", pady=(2, 10))
+        self.assistant_list.pack(fill="x", pady=(4, 16))
         self.assistant_list.bind("<Double-Button-1>", lambda event: self.open_bot())
 
         self.users_label = ttk.Label(side, text="ONLINE USERS (DOUBLE-CLICK TO CHAT)", style="Section.TLabel")
         self.users_label.pack(anchor="w")
         self.user_list = make_list(side, height=6)
-        self.user_list.pack(fill="x", pady=(2, 10))
+        self.user_list.pack(fill="x", pady=(4, 16))
         self.user_list.bind("<Double-Button-1>", self.on_user_double_click)
 
         # Group buttons: packed at the bottom BEFORE the tree, like the chat box in RoomTab. When the window is
         # short, pack takes the missing height from the widgets packed last, so the tree shrinks, not the buttons.
         buttons = ttk.Frame(side, style="White.TFrame")
-        buttons.pack(side="bottom", fill="x")
-        ttk.Button(buttons, text="Create…", command=self.create_group).pack(side="left", expand=True, fill="x")
-        ttk.Button(buttons, text="Join", command=self.join_group).pack(side="left", expand=True, fill="x", padx=3)
-        ttk.Button(buttons, text="Leave", command=self.leave_group).pack(side="left", expand=True, fill="x")
+        buttons.pack(side="bottom", fill="x", pady=(10, 0))
+        # Three equal columns (uniform), so no button is squeezed out however long its label is.
+        for column, (label, style, command) in enumerate((("+ Create", "Primary.TButton", self.create_group),
+                                                          ("Join", "TButton", self.join_group),
+                                                          ("Leave", "Danger.TButton", self.leave_group))):
+            ttk.Button(buttons, text=label, style=style, command=command).grid(
+                row=0, column=column, sticky="ew", padx=(0 if column == 0 else 6, 0))
+            buttons.columnconfigure(column, weight=1, uniform="group_buttons")
         ttk.Label(side, text="GROUPS AND MEMBERS", style="Section.TLabel").pack(anchor="w")
         self.group_tree = ttk.Treeview(side, show="tree", height=6, selectmode="browse")   # grows to fill the rest
-        self.group_tree.pack(fill="both", expand=True, pady=(2, 4))
+        self.group_tree.pack(fill="both", expand=True, pady=(4, 4))
         self.group_tree.bind("<Double-Button-1>", self.on_group_double_click)
         panes.add(side, weight=0)
 
         self.notebook = ttk.Notebook(panes)
-        welcome = ttk.Frame(self.notebook, style="White.TFrame", padding=20)
-        ttk.Label(welcome, style="White.TLabel", justify="left", text=(
-            f"Logged in as {self.me}.\n\n"
-            "• Double-click a user to open a private chat.\n"
-            "• Create a group, or select one and press Join.\n"
-            "• Double-click a group you are in to open its chat.\n"
-            "• Double-click AI Assistant to ask the chatbot.\n"
-            "• In a chat, use the AI tools bar and the buttons on each message."
-        )).pack(anchor="nw")
+        welcome = ttk.Frame(self.notebook, style="White.TFrame", padding=36)
+        ttk.Label(welcome, text=f"Welcome, {self.me}", style="White.TLabel", font=TITLE_FONT).pack(anchor="w")
+        ttk.Label(welcome, text="Here is how to get started", style="White.TLabel", foreground=GRAY).pack(
+            anchor="w", pady=(2, 24))
+        for glyph, color, title, detail in WELCOME_TIPS:       # one card per tip: a coloured icon, a title, a line of help
+            card = tk.Frame(welcome, bg=BG, padx=18, pady=11)
+            card.pack(fill="x", pady=5)
+            make_avatar(card, title, BG, size=40, color=color, glyph=glyph).pack(side="left", padx=(0, 16))
+            words = tk.Frame(card, bg=BG)
+            words.pack(side="left", fill="x", expand=True)
+            tk.Label(words, text=title, bg=BG, fg=INK, font=BOLD, anchor="w").pack(fill="x")
+            text_label = tk.Label(words, text=detail, bg=BG, fg=GRAY, font=FONT, anchor="w", justify="left")
+            text_label.pack(fill="x")
+            # Wrap the help text to the card's width, so it is never cut off however wide the window is.
+            card.bind("<Configure>", lambda event, label=text_label: label.configure(wraplength=max(event.width - 130, 200)))
         self.notebook.add(welcome, text="Welcome")
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
         panes.add(self.notebook, weight=1)
@@ -1164,7 +1356,7 @@ def main():
         ChatApp(root, sock, name)
 
     login = LoginFrame(root, args.host, args.port, args.name, on_success=start_chat)
-    login.pack()
+    login.pack(padx=32, pady=32)            # the white card floats on the window's soft grey
     root.mainloop()
 
 

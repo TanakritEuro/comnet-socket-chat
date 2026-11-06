@@ -195,6 +195,14 @@ traced to broken IPv6 on the dev machine, and `ai.py` now tries IPv4 first.)
 (Claude Code used a per-connection send **queue with its own writer thread** instead of a per-socket send lock, because a send lock
 taken after releasing the global lock can't keep the per-socket order; see "Q&A prep: concurrency".)
 
+**Prompt P14** (modern UI, PR `feat/modern-ui`):
+
+> can u create new branch to improve the ui of this app make it look modern pls
+> (use as much limit as u want, i want this app to look more beautiful and modern. i give you max 1 hr to do it pls)
+
+(Claude Code kept the app standard-library only, because an earlier try with the `ttkbootstrap` library was rejected; the rounded look
+is drawn in code instead. Networking and protocol code are unchanged.)
+
 ## R1: System architecture
 Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides are in [`docs/diagrams/`](diagrams/)
 (re-render with `python scripts/render_diagrams.py` after editing the Mermaid blocks).
@@ -389,6 +397,25 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 - **Proof:** `scripts/e2e_gui_check.py` (checks labelled `AI`): the controls exist, and a real click on the Translate link and on the
   Analyze mood button works through the real server (with fake AI) in every result state.
 - **AI prompt:** P5
+## Modern look (UI only, no protocol change)
+- **How:** One colour palette (blue accent, violet for "AI", slate greys) and larger type are defined as constants at the top of
+  `client.py`. The buttons and text fields are **rounded**, which plain Tkinter can't do, so the code draws small rounded rectangles
+  with soft edges (`rounded_image`, which also writes the PNG bytes by hand with `struct` and `zlib`) and registers them as ttk
+  *image elements*; ttk stretches the middle and keeps the corners, so one image makes a button of any size. The widgets are still
+  ordinary `ttk.Button` / `ttk.Entry`, so `.state()`, `.invoke()` and every test keep working. Messages are laid out like Slack: a round
+  **avatar** (a canvas embedded in the chat text), the name and time, and the text indented under the name. The login screen is a
+  blue brand panel next to the form, the sidebar has a profile header and three equal buttons, and the Welcome tab shows tip cards.
+  Everything scales with the Windows display scaling (`ui_scale`).
+- **Code snapshot (mandatory):** `client.py` → `rounded_image` (L95–), `build_skin` (L140–) and `apply_theme` (L171–): the rounded buttons
+  and fields, the tab, list and scroll-bar styles
+- **Code snapshot 2:** `client.py` → `make_chat_window` (L324–: the message tags, `indent`) and `add_avatar` (L392–), `RoomTab.add_message` (L495–)
+- **Code snapshot 3:** `client.py` → `LoginFrame` (L237–) and `ChatApp.build_widgets` (L845–)
+- **Talking points:** no new dependency (a library like `ttkbootstrap` would have to be installed on every PC before the demo);
+  the look is separate from the networking, so the receiver-thread → queue → `poll_inbox` design is untouched; avatars are one character
+  of the `Text` widget, so the per-message AI controls (slots and tags) work exactly as before.
+- **Proof:** `python scripts/e2e_gui_check.py` (all checks still pass: the widgets keep their names and behaviour) and the unit tests.
+- **AI prompt:** P14
+
 ## AI chatbot (AI Assistant tab)
 - **How:** Double-click **AI Assistant** in the sidebar. A question sends `BOT_ASK {text, room?}`. The server first checks the text is not
   blank and that this user has no question in progress (`BUSY`). If a `room` is given ("Explain my last chat") it runs the same
