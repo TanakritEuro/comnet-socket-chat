@@ -203,6 +203,16 @@ taken after releasing the global lock can't keep the per-socket order; see "Q&A 
 (Claude Code kept the app standard-library only, because an earlier try with the `ttkbootstrap` library was rejected; the rounded look
 is drawn in code instead. Networking and protocol code are unchanged.)
 
+**Prompt P15** (restyle the client to a design, same branch `feat/modern-ui`):
+
+> Restyle the Tkinter client (client.py) to match the design in ../ui-design/. First read ../ui-design/CLAUDE.md completely and look at every
+> image in ../ui-design/screens/. ... Then do the work in these steps. After EACH step: run the unit tests and `scripts/e2e_gui_check.py`, fix
+> anything that broke, commit with a clear message, and stop so I can try the app. 1. Tokens 2. Sidebar 3. Room header 4. Messages 5. Tabs and
+> composer 6. Login. If something in the design is too hard or risky in plain Tkinter, tell me and suggest the simplest version that still looks
+> close. Don't silently skip it. Finally, update docs/SLIDE_NOTES.md with one short entry about the UI redesign.
+
+(The full wording is in the chat history; the six steps are the six commits "UI redesign 1/6" to "6/6".)
+
 ## R1: System architecture
 Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides are in [`docs/diagrams/`](diagrams/)
 (re-render with `python scripts/render_diagrams.py` after editing the Mermaid blocks).
@@ -415,6 +425,20 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   of the `Text` widget, so the per-message AI controls (slots and tags) work exactly as before.
 - **Proof:** `python scripts/e2e_gui_check.py` (all checks still pass: the widgets keep their names and behaviour) and the unit tests.
 - **AI prompt:** P14
+
+## UI redesign (client matches the design in ui-design/)
+- **How:** The six design steps were done as six commits: colour/font tokens, a dark navy sidebar, a room header with Translate / Summarize / Leave,
+  chat bubbles, tabs with a composer, and a new login screen. A **bubble** is a `ttk.Label` drawn on a rounded image (the same
+  `rounded_image` trick as the buttons) embedded in the chat `Text`; it wraps at 70 % of the window and re-wraps 120 ms after a resize stops.
+  Mood chips, translation boxes and summary cards go in at *marks* saved when the message was added. A taken name (R3) now shows a red message
+  under the name field instead of a pop-up. The 1500-line `client.py` was split into `ui_theme.py`, `ui_widgets.py`, `chat_tabs.py` and `client.py`.
+- **Code snapshot (mandatory):** `chat_tabs.py` → `Bubbles.make_bubble` / `embed` and `RoomTab.add_message`; `ui_theme.py` → `build_skin`
+- **Code snapshot 2:** `client.py` → `LoginFrame.show_name_error` (R3 inline error)
+- **Talking points:** ttk stretches the middle of an image by *tiling* it, so a 2 px middle made resizing take seconds (fixed with a 120 px strip
+  and by drawing only the corners); Tk images must never be freed from the receiver thread; text in a label can't be selected, so a right-click
+  offers Copy. Compromises: unread count is text "(2)" in the tab label, not a blue circle; tabs are flat (ttk can't colour one tab differently).
+- **Proof:** unit tests (177) and `scripts/e2e_gui_check.py` (83 checks, including the inline R3 error)
+- **AI prompt:** P15
 
 ## AI chatbot (AI Assistant tab)
 - **How:** Double-click **AI Assistant** in the sidebar. A question sends `BOT_ASK {text, room?}`. The server first checks the text is not
