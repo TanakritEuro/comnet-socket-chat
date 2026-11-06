@@ -269,14 +269,14 @@ def make_avatar(parent, name, background, size=32, color=None, glyph=None, onlin
     return canvas
 
 
-def make_square_icon(parent, background, glyph, fill, size=28, border=None):
+def make_square_icon(parent, background, glyph, fill, size=28, border=None, glyph_color=None):
     """A rounded-square icon with a glyph on it: "#" for a group, ✦ for the assistant."""
     scale = ui_scale(parent)
     size, radius = round(size * scale), round(8 * scale)
     canvas = tk.Canvas(parent, width=size, height=size, bg=background, highlightthickness=0, borderwidth=0)
     canvas.box = rounded_image(parent, radius, fill, border, 1, extra=size - 2 * radius)
     canvas.create_image(size // 2, size // 2, image=canvas.box)
-    canvas.create_text(size / 2, size / 2, text=glyph, fill="#FFFFFF" if border is None else SIDEBAR_MUTED,
+    canvas.create_text(size / 2, size / 2, text=glyph, fill=glyph_color or ("#FFFFFF" if border is None else SIDEBAR_MUTED),
                        font=("Segoe UI", max(size // 2 - 2, 8), "bold"))
     return canvas
 
@@ -570,15 +570,17 @@ def append_text(window, text, *tags):
 
 
 class RoomTab(ttk.Frame):
-    """One chat room (R5): a header, an AI strip, a read-only chat window and a chat box with Send (R6).
+    """One chat room (R5): a header, a read-only chat window and a chat box with Send (R6).
 
-    The AI strip and the per-message controls are the plug-in points for the AI features. This class only
+    The header holds the room's name and the AI actions that work on the whole room (Translate to, Summarize),
+    plus Leave in a group. The per-message controls are the plug-in points for the AI features. This class only
     draws things and calls the callbacks below; the network side lives in ChatApp. Features show their
     results through show_translating / add_translation / translation_failed, show_mood_pending / set_mood /
     mood_failed and add_summary.
     """
 
-    def __init__(self, parent, on_send, on_summarize, on_translate, on_mood, title="", subtitle="", on_file=None):
+    def __init__(self, parent, on_send, on_summarize, on_translate, on_mood, title="", subtitle="", on_file=None,
+                 icon=None, on_leave=None):
         super().__init__(parent, padding=(20, 16), style="White.TFrame")
         self.on_send = on_send              # function(text) -> True if the message was sent
         self.on_summarize = on_summarize    # function() -> True if SUMMARIZE was sent
@@ -601,24 +603,39 @@ class RoomTab(ttk.Frame):
         self.entry.bind("<Return>", lambda event: self.send())
         ttk.Button(bar, text="Send  ➤", style="Primary.TButton", command=self.send).pack(side="left", padx=(10, 0))
 
-        head = ttk.Frame(self, style="White.TFrame")
-        head.pack(side="top", fill="x", pady=(0, 10))
-        ttk.Label(head, text=title, style="White.TLabel", font=HEAD_FONT).pack(anchor="w")
-        self.subtitle = ttk.Label(head, text=subtitle, style="White.TLabel", foreground=GRAY, font=SMALL)
-        self.subtitle.pack(anchor="w", pady=(2, 0))
-
-        # AI strip: everything AI that works on the whole room, in one soft violet bar.
-        strip = tk.Frame(self, bg=VIOLET_LIGHT, padx=14, pady=9, highlightthickness=1, highlightbackground="#E9DDFF")
-        strip.pack(side="top", fill="x", pady=(0, 10))
-        tk.Label(strip, text="✦ AI tools", bg=VIOLET_LIGHT, fg=VIOLET_DARK, font=BOLD).pack(side="left")
-        tk.Label(strip, text="Translate to:", bg=VIOLET_LIGHT, fg=INK, font=FONT).pack(side="left", padx=(14, 4))
+        # Header: the room's icon, name and a line of help on the left; Translate, Summarize and (in a group)
+        # Leave on the right. The actions are packed before the names, so a narrow window clips the help text
+        # and never the buttons.
+        head = tk.Frame(self, bg=SURFACE)
+        head.pack(side="top", fill="x")
+        icon_width = 0
+        if icon is not None:
+            icon_widget = icon(head, SURFACE)
+            icon_widget.pack(side="left", padx=(0, 12))
+            icon_width = icon_widget.winfo_reqwidth() + 12
+        actions = tk.Frame(head, bg=SURFACE)
+        actions.pack(side="right")
+        self.leave_button = None
+        if on_leave is not None:            # only a group has a Leave button
+            self.leave_button = ttk.Button(actions, text="Leave", style="Danger.TButton", command=on_leave)
+            self.leave_button.pack(side="right", padx=(8, 0))
+        self.summarize_button = ttk.Button(actions, text="✦ Summarize", style="AI.TButton", command=self.summarize)
+        self.summarize_button.pack(side="right", padx=(8, 0))
         # The picker only chooses the target language; nothing is translated until a message's link is clicked.
-        self.language_box = ttk.Combobox(strip, values=[name for _, name in LANGUAGE_CHOICES],
-                                         state="readonly", width=18)
+        self.language_box = ttk.Combobox(actions, values=[name for _, name in LANGUAGE_CHOICES],
+                                         state="readonly", width=16)
         self.language_box.current(0)
-        self.language_box.pack(side="left")
-        self.summarize_button = ttk.Button(strip, text="✦ Summarize chat", style="AI.TButton", command=self.summarize)
-        self.summarize_button.pack(side="right")
+        self.language_box.pack(side="right")
+        tk.Label(actions, text="Translate to", bg=SURFACE, fg=GRAY, font=FONT).pack(side="right", padx=(0, 8))
+        names = tk.Frame(head, bg=SURFACE)
+        names.pack(side="left")
+        tk.Label(names, text=title, bg=SURFACE, fg=INK, font=HEAD_FONT).pack(anchor="w")
+        self.subtitle = tk.Label(names, text=subtitle, bg=SURFACE, fg=GRAY, font=SMALL, justify="left")
+        self.subtitle.pack(anchor="w")
+        # A long member list wraps into the space left beside the buttons, instead of being clipped.
+        head.bind("<Configure>", lambda event: self.subtitle.configure(
+            wraplength=max(event.width - actions.winfo_reqwidth() - icon_width - 24, 160)))
+        tk.Frame(self, bg=LINE, height=1).pack(side="top", fill="x", pady=(12, 0))     # the line under the header
 
         self.window = make_chat_window(self)
         self.window.pack(fill="both", expand=True)
@@ -878,14 +895,17 @@ class BotTab(ttk.Frame):
             chip.pack(side="left", padx=(0, 8))
             self.chips.append(chip)
 
-        head = tk.Frame(self, bg=VIOLET_LIGHT, padx=16, pady=12, highlightthickness=1, highlightbackground="#E9DDFF")
+        # Header: a violet ✦ icon, the title in deep violet, and Clear conversation on the right (packed first,
+        # so a narrow window never squeezes it out).
+        head = tk.Frame(self, bg=SUMMARY_BG, padx=16, pady=12, highlightthickness=1, highlightbackground=SUMMARY_LINE)
         head.pack(side="top", fill="x", pady=(0, 10))
-        titles = tk.Frame(head, bg=VIOLET_LIGHT)
-        titles.pack(side="left")
-        tk.Label(titles, text="✦ AI Assistant", bg=VIOLET_LIGHT, fg=VIOLET_DARK, font=HEAD_FONT).pack(anchor="w")
-        tk.Label(titles, text="Private to you · answers come from Gemini and can be wrong",
-                 bg=VIOLET_LIGHT, fg=GRAY, font=SMALL).pack(anchor="w")
+        make_square_icon(head, SUMMARY_BG, "✦", VIOLET, size=40).pack(side="left", padx=(0, 12))
         ttk.Button(head, text="Clear conversation", command=self.clear).pack(side="right")
+        titles = tk.Frame(head, bg=SUMMARY_BG)
+        titles.pack(side="left")
+        tk.Label(titles, text="AI Assistant", bg=SUMMARY_BG, fg="#4C1D95", font=HEAD_FONT).pack(anchor="w")
+        tk.Label(titles, text="Private to you · answers come from Gemini and can be wrong",
+                 bg=SUMMARY_BG, fg=GRAY, font=SMALL).pack(anchor="w")
 
         self.window = make_chat_window(self)
         self.window.pack(fill="both", expand=True)
@@ -1339,16 +1359,17 @@ class ChatApp:
     # Rooms (tabs)
     # ------------------------------------------------------------------
 
-    def open_room(self, room, title, on_send, subtitle="", select=True):
-        """Return the tab for this room id, creating it first if needed (R5: one tab per room)."""
+    def open_room(self, room, title, on_send, subtitle="", select=True, heading=None, icon=None, on_leave=None):
+        """Return the tab for this room id, creating it first if needed (R5: one tab per room).
+        `title` is the tab's label ("@bob"); `heading` is the name in the header ("bob")."""
         if room not in self.rooms:
             self.rooms[room] = RoomTab(
                 self.notebook, on_send,
                 on_summarize=lambda: self.send(SUMMARIZE, room=room),
                 on_translate=lambda ts, to: self.translate_message(room, ts, to),
                 on_mood=lambda ts: self.analyze_mood(room, ts),
-                title=title, subtitle=subtitle,
-                on_file=lambda path: self.send_file(room, path))
+                title=heading or title, subtitle=subtitle,
+                on_file=lambda path: self.send_file(room, path), icon=icon, on_leave=on_leave)
             self.notebook.add(self.rooms[room], text=title)
             self.request_history(room)
         if select:
@@ -1360,20 +1381,23 @@ class ChatApp:
         """Private chat tab with one user (R7)."""
         return self.open_room(dm_room(self.me, user), f"@{user}",
                               lambda text: self.send(DM, to=user, text=text),
-                              f"Private chat · only you and {user} can see these messages", select)
+                              f"🔒 Private chat · only you and {user} can see these messages", select,
+                              heading=user, icon=lambda parent, bg: make_avatar(parent, user, bg, size=40))
 
     def open_group(self, group, select=True):
-        """Group chat tab (R11)."""
+        """Group chat tab (R11), with a Leave button in its header."""
         return self.open_room(group_room(group), f"#{group}",
                               lambda text: self.send(GROUP_MSG, group=group, text=text),
-                              self.group_subtitle(group), select)
+                              self.group_subtitle(group), select, heading=group,
+                              icon=lambda parent, bg: make_square_icon(parent, bg, "#", "#DBEAFE", size=40, glyph_color=BLUE),
+                              on_leave=lambda: self.leave_group(group))
 
     def group_subtitle(self, group):
         info = self.groups.get(group)
         if info is None:
-            return "Group chat · only members can see these messages"
+            return "Group · only members see these messages"
         members = ", ".join(self.member_text(member, info) for member in info["members"])
-        return f"Group · {len(info['members'])} members: {members} · only members can see these messages"
+        return f"Group · {members} · only members see these messages"
 
     def open_bot(self, select=True):
         """The AI Assistant tab (special 4). Not a room: the conversation is private to us."""

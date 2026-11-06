@@ -435,9 +435,9 @@ def main():
         wait_until(root, lambda: False, timeout=0.5)
         screenshot([root, bob_window], args.screenshot)
 
-    # Leave closes the tab
-    alice.group_rows["net lab"].click()
-    alice.leave_group()
+    # Leave is a button in a group's header (a private chat has none) and it closes the tab
+    check("R10 only a group's header has a Leave button", reopened.leave_button is None and group_tab.leave_button is not None)
+    group_tab.leave_button.invoke()
     check("R10 Leave closes alice's group tab", wait_until(root, lambda: "group:net lab" not in alice.rooms))
 
     # Closing a window updates everyone's user list
