@@ -629,6 +629,10 @@ class ChatApp:
         part = self.notebook.identify(event.x, event.y)
         if not part:
             return None, ""
+        # ttk reports the x itself as "Tab.close" and the empty space around it as "focus"; that space counts
+        # as the x too (a bigger target), but the 1 px of "focus" on the tab's left edge must not.
+        if part == "Tab.close" or (part == "focus" and self.notebook.identify(event.x - 12, event.y) == "label"):
+            part = "close"
         try:
             return self.notebook.index(f"@{event.x},{event.y}"), part
         except tk.TclError:

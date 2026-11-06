@@ -269,8 +269,8 @@ def apply_theme(root):
     style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
     # Tabs: the idle ones have no fill and grey bold text; the open one is white with ink text and a 1 px border.
     style.configure("TNotebook.Tab", background=BG, foreground=GRAY, padding=(14, 11), borderwidth=1, font=BOLD,
-                    width=TAB_CHARS, anchor="center", bordercolor=BG, lightcolor=BG, darkcolor=BG)
-    style.map("TNotebook.Tab", background=[("selected", SURFACE), ("active", "#E7ECF3")],
+                    width=TAB_CHARS, anchor="center", expand=(0, 0, 0, 0), bordercolor=BG, lightcolor=BG, darkcolor=BG)
+    style.map("TNotebook.Tab", expand=[("selected", (0, 0, 0, 0))], padding=[("selected", (14, 11))], background=[("selected", SURFACE), ("active", "#E7ECF3")],
               foreground=[("selected", INK), ("active", INK)],
               bordercolor=[("selected", LINE)], lightcolor=[("selected", SURFACE)], darkcolor=[("selected", LINE)])
     # Lists: no frame, taller rows, a soft blue selection.
