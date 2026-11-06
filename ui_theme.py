@@ -56,7 +56,14 @@ def _png(width, height, rows):
     def chunk(kind, body):
         return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
 
-    raw = b"".join(b"\x00" + bytes(value for pixel in row for value in pixel) for row in rows)   # filter byte 0 per row
+    encoded = {}                            # many rows are the very same list: convert each one only once
+
+    def row_bytes(row):
+        if id(row) not in encoded:
+            encoded[id(row)] = bytes(value for pixel in row for value in pixel)
+        return encoded[id(row)]
+
+    raw = b"".join(b"\x00" + row_bytes(row) for row in rows)        # filter byte 0 per row
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
             + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
@@ -66,9 +73,12 @@ def _rgb(color):
 
 
 _IMAGE_CACHE = {}       # (radius, fill, border, border_width, extra) -> (Tk interpreter, PhotoImage)
+# Width of the stretchy middle of a button or field image. ttk fills it by TILING, one tile per copy of the middle,
+# so a narrow middle means hundreds of tiles per redraw and a laggy window resize. A wide one means a few tiles.
+STRETCH = 120
 
 
-def rounded_image(master, radius, fill, border=None, border_width=1, extra=24):
+def rounded_image(master, radius, fill, border=None, border_width=1, extra=None):
     """A small rounded rectangle with soft (anti-aliased) edges, as a PhotoImage. ttk keeps its four corners
     and stretches the middle, so this one image becomes a button or text field of any size. The outside is
     transparent, so the colour behind the widget shows around the corners. With extra=0 the image is exactly
@@ -77,11 +87,12 @@ def rounded_image(master, radius, fill, border=None, border_width=1, extra=24):
     Each distinct image is made once and kept for the whole run. That is faster (the sidebar redraws its rows
     often), and it matters for safety: a Tk image must be freed by the GUI thread, but Python may free an
     unused one in the receiver thread, which makes Tk hang or raise "main thread is not in main loop"."""
+    extra = STRETCH if extra is None else extra
     key = (radius, fill, border, border_width, extra)
     cached = _IMAGE_CACHE.get(key)
     if cached and cached[0] is master.tk:
         return cached[1]
-    size = 2 * radius + extra                   # the four corners (radius + 1 each) plus a 2-pixel strip ttk can stretch
+    size = 2 * radius + extra                   # the four corners (radius + 1 each) plus a wide strip ttk can stretch
     half = size / 2
     fill_rgb, border_rgb = _rgb(fill), _rgb(border or fill)
 
@@ -91,16 +102,33 @@ def rounded_image(master, radius, fill, border=None, border_width=1, extra=24):
         dx, dy = abs(x - half) - (half - inset - r), abs(y - half) - (half - inset - r)
         return math.hypot(max(dx, 0.0), max(dy, 0.0)) + min(max(dx, dy), 0.0) - r
 
-    rows = []
+    def pixel(px, py):
+        x, y = px + 0.5, py + 0.5
+        outer = min(max(0.5 - distance(x, y, 0), 0.0), 1.0)          # 1 inside the shape, 0 outside, soft in between
+        inner = min(max(0.5 - distance(x, y, border_width), 0.0), 1.0) if border else 1.0
+        rgb = tuple(round(b * (1 - inner) + f * inner) for b, f in zip(border_rgb, fill_rgb))
+        return (*rgb, round(255 * outer))
+
+    # Only the corners differ from pixel to pixel. The flat middle looks the same everywhere, so one column
+    # (and one row) of it is computed and reused, which keeps a wide image as cheap to draw as a small one.
+    corner = radius + 2
+
+    def flat(n):
+        return n if n < corner or n >= size - corner else corner
+
+    rows, made = [], {}
     for py in range(size):
-        row = []
-        for px in range(size):
-            x, y = px + 0.5, py + 0.5
-            outer = min(max(0.5 - distance(x, y, 0), 0.0), 1.0)      # 1 inside the shape, 0 outside, soft in between
-            inner = min(max(0.5 - distance(x, y, border_width), 0.0), 1.0) if border else 1.0
-            rgb = tuple(round(b * (1 - inner) + f * inner) for b, f in zip(border_rgb, fill_rgb))
-            row.append((*rgb, round(255 * outer)))
-        rows.append(row)
+        y = flat(py)
+        if y not in made:
+            cells = {}
+            row = []
+            for px in range(size):
+                x = flat(px)
+                if x not in cells:
+                    cells[x] = pixel(x, y)
+                row.append(cells[x])
+            made[y] = row
+        rows.append(made[y])
     image = tk.PhotoImage(master=master, data=base64.b64encode(_png(size, size, rows)).decode("ascii"))
     _IMAGE_CACHE[key] = (master.tk, image)
     return image
