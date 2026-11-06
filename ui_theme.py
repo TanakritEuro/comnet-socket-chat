@@ -162,12 +162,20 @@ def build_skin(style, master):
     if "Skin.TButton" in style.element_names():
         return                                  # already built for this window system
     radius = round(9 * ui_scale(master))
+    # ttk uses an image's own size as the control's minimum size, and our images are wide (STRETCH), so the
+    # minimum is set here: just the two corners across, and a control height of 44 px down (34 for the small
+    # suggestion chips). ttk also pads a control by the image's corner size; we keep that sideways but drop it
+    # vertically, so the height is the text plus the style's padding, never taller than the minimum asks for.
+    scale = ui_scale(master)
+    min_width, corner_padding = 2 * (radius + 1), (radius + 1, 0, radius + 1, 0)
     for name, (fill, hover, pressed, border, text, off_fill, off_border, off_text, padding) in BUTTON_LOOKS.items():
+        min_height = round((34 if name == "Chip.TButton" else 44) * scale)
         normal, active, down, disabled = (rounded_image(master, radius, f, b) for f, b in (
             (fill, border), (hover, border), (pressed, border), (off_fill, off_border)))
         _SKIN_IMAGES.extend((normal, active, down, disabled))
         style.element_create(f"Skin.{name}", "image", normal, ("disabled", disabled), ("pressed", down),
-                             ("active", active), border=radius + 1, sticky="nsew")
+                             ("active", active), border=radius + 1, padding=corner_padding, width=min_width,
+                             height=min_height, sticky="nsew")
         style.layout(name, [(f"Skin.{name}", {"sticky": "nsew", "children": [
             ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
         on_dark = name.startswith("Sidebar")        # these two buttons sit on the navy sidebar, not on a white card
@@ -180,7 +188,8 @@ def build_skin(style, master):
         (SURFACE, "#CBD5E1", 1), (SURFACE, BLUE, 2), ("#F8FAFC", "#E2E8F0", 1)))
     _SKIN_IMAGES.extend((field, focused, off))
     style.element_create("Skin.entry", "image", field, ("disabled", off), ("focus", focused),
-                         border=radius + 1, sticky="nsew")
+                         border=radius + 1, padding=corner_padding, width=min_width,
+                         height=round(44 * scale), sticky="nsew")
     style.layout("TEntry", [("Skin.entry", {"sticky": "nsew", "children": [
         ("Entry.padding", {"sticky": "nsew", "children": [("Entry.textarea", {"sticky": "nsew"})]})]})])
     # The language drop-down gets the same rounded field, with its arrow on the right.
