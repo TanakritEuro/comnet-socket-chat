@@ -79,6 +79,45 @@ def make_chat_window(parent):
     return window
 
 
+class PlaceholderEntry(ttk.Entry):
+    """A text field that shows a grey hint while it is empty and not focused. get() returns "" while the hint
+    shows, and insert() / delete() work as if it were not there, so callers never see the hint."""
+
+    def __init__(self, parent, placeholder):
+        super().__init__(parent)
+        self.placeholder = placeholder
+        self.showing = False
+        self.bind("<FocusIn>", lambda event: self.hide(), add="+")
+        self.bind("<FocusOut>", lambda event: self.show(), add="+")
+        self.show()
+
+    def show(self):
+        if not self.showing and not super().get():
+            super().insert(0, self.placeholder)
+            self.configure(foreground=GRAY)
+            self.showing = True
+
+    def hide(self):
+        if self.showing:
+            super().delete(0, "end")
+            self.configure(foreground=INK)
+            self.showing = False
+
+    def get(self):
+        return "" if self.showing else super().get()
+
+    def insert(self, index, text):
+        self.hide()
+        super().insert(index, text)
+
+    def delete(self, first, last=None):
+        if self.showing:
+            return
+        super().delete(first, last)
+        if self.focus_get() is not self:
+            self.show()
+
+
 def format_size(size):
     """A file size for people: "532 B", "12.3 KB" or "4.8 MB"."""
     if size < 1024:
@@ -230,9 +269,9 @@ class RoomTab(Bubbles, ttk.Frame):
     """
 
     def __init__(self, parent, on_send, on_summarize, on_translate, on_mood, title="", subtitle="", on_file=None,
-                 icon=None, on_leave=None):
+                 icon=None, on_leave=None, placeholder=""):
         super().__init__(parent, padding=(20, 16), style="White.TFrame")
-        self.on_send = on_send              # function(text) -> True if the message was sent
+        self.on_send = on_send             # function(text) -> True if the message was sent
         self.on_summarize = on_summarize    # function() -> True if SUMMARIZE was sent
         self.on_translate = on_translate    # function(ts, language code) -> True if the request was sent
         self.on_mood = on_mood              # function(ts) -> True if the request was sent
@@ -247,9 +286,10 @@ class RoomTab(Bubbles, ttk.Frame):
         # never gets squeezed out when the window is small.
         bar = ttk.Frame(self, style="White.TFrame")
         bar.pack(side="bottom", fill="x", pady=(14, 0))
+        tk.Frame(self, bg=LINE, height=1).pack(side="bottom", fill="x")      # the line above the composer (packed after the bar, so it sits over it)
         if on_file is not None:
-            ttk.Button(bar, text="📎 Attach", command=self.attach).pack(side="left", padx=(0, 10))
-        self.entry = ttk.Entry(bar)
+            ttk.Button(bar, text="📎", style="Square.TButton", command=self.attach).pack(side="left", padx=(0, 10))
+        self.entry = PlaceholderEntry(bar, placeholder or f"Message {title}")
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Return>", lambda event: self.send())
         ttk.Button(bar, text="Send  ➤", style="Primary.TButton", command=self.send).pack(side="left", padx=(10, 0))
@@ -630,7 +670,8 @@ class BotTab(Bubbles, ttk.Frame):
 
         bar = ttk.Frame(self, style="White.TFrame")
         bar.pack(side="bottom", fill="x", pady=(10, 0))
-        self.entry = ttk.Entry(bar)
+        tk.Frame(self, bg=LINE, height=1).pack(side="bottom", fill="x")      # the line above the composer
+        self.entry = PlaceholderEntry(bar, "Ask the assistant…")
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Return>", lambda event: self.ask())
         self.ask_button = ttk.Button(bar, text="Ask  ✦", style="AI.TButton", command=self.ask)
@@ -715,8 +756,8 @@ class BotTab(Bubbles, ttk.Frame):
 
     def set_waiting(self, waiting):
         self.waiting = waiting
-        for button in (self.ask_button, *self.chips):
-            button.state(["disabled" if waiting else "!disabled"])
+        for widget in (self.entry, self.ask_button, *self.chips):
+            widget.state(["disabled" if waiting else "!disabled"])
 
     def clear(self):
         """Wipe the conversation on screen and tell the server to forget it too."""

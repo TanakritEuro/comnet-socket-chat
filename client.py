@@ -528,7 +528,8 @@ class ChatApp:
                 on_translate=lambda ts, to: self.translate_message(room, ts, to),
                 on_mood=lambda ts: self.analyze_mood(room, ts),
                 title=heading or title, subtitle=subtitle,
-                on_file=lambda path: self.send_file(room, path), icon=icon, on_leave=on_leave)
+                on_file=lambda path: self.send_file(room, path), icon=icon, on_leave=on_leave,
+                placeholder=f"Message {title}")
             self.notebook.add(self.rooms[room], text=title)
             self.request_history(room)
         if select:
@@ -562,7 +563,7 @@ class ChatApp:
         """The AI Assistant tab (special 4). Not a room: the conversation is private to us."""
         if self.bot_tab is None:
             self.bot_tab = BotTab(self.notebook, self.ask_bot, self.clear_bot)
-            self.notebook.add(self.bot_tab, text="AI Assistant")
+            self.notebook.add(self.bot_tab, text="✦ Assistant")
         if select:
             self.notebook.select(self.bot_tab)
             self.bot_tab.entry.focus_set()

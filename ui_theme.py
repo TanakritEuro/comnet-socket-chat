@@ -140,6 +140,7 @@ _SKIN_IMAGES = []       # Tk draws an image only while Python holds a reference 
 # disabled text, padding). Primary (blue) is for Send/Connect, AI (violet) for AI actions.
 BUTTON_LOOKS = {
     "TButton": (SURFACE, "#F1F5F9", "#E2E8F0", "#CBD5E1", INK, "#F8FAFC", "#E2E8F0", "#94A3B8", (12, 8)),
+    "Square.TButton": (SURFACE, "#F1F5F9", "#E2E8F0", "#CBD5E1", INK, "#F8FAFC", "#E2E8F0", "#94A3B8", (0, 8)),
     "Primary.TButton": (BLUE, BLUE_DARK, "#1E40AF", None, "#FFFFFF", "#93C5FD", None, "#FFFFFF", (14, 8)),
     "AI.TButton": (VIOLET, VIOLET_DARK, "#5B21B6", None, "#FFFFFF", "#C4B5FD", None, "#FFFFFF", (14, 7)),
     "Chip.TButton": (VIOLET_LIGHT, VIOLET_TINT, "#E9DDFF", "#DDD6FE", "#4C1D95", "#F8FAFC", "#E2E8F0", "#94A3B8", (12, 5)),
@@ -170,11 +171,12 @@ def build_skin(style, master):
     min_width, corner_padding = 2 * (radius + 1), (radius + 1, 0, radius + 1, 0)
     for name, (fill, hover, pressed, border, text, off_fill, off_border, off_text, padding) in BUTTON_LOOKS.items():
         min_height = round((34 if name == "Chip.TButton" else 44) * scale)
+        control_width = round(44 * scale) if name == "Square.TButton" else min_width      # the attach button is a 44 px square
         normal, active, down, disabled = (rounded_image(master, radius, f, b) for f, b in (
             (fill, border), (hover, border), (pressed, border), (off_fill, off_border)))
         _SKIN_IMAGES.extend((normal, active, down, disabled))
         style.element_create(f"Skin.{name}", "image", normal, ("disabled", disabled), ("pressed", down),
-                             ("active", active), border=radius + 1, padding=corner_padding, width=min_width,
+                             ("active", active), border=radius + 1, padding=corner_padding, width=control_width,
                              height=min_height, sticky="nsew")
         style.layout(name, [(f"Skin.{name}", {"sticky": "nsew", "children": [
             ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
@@ -182,6 +184,8 @@ def build_skin(style, master):
         style.configure(name, foreground=text, padding=padding, anchor="center",
                         background=SIDEBAR if on_dark else SURFACE,      # what shows through the rounded corners
                         font=SMALL_BOLD if on_dark else (FONT if name in ("TButton", "Danger.TButton") else BOLD))
+        if name == "Square.TButton":
+            style.configure(name, width=0)         # ttk buttons are at least 11 characters wide unless told otherwise
         style.map(name, foreground=[("disabled", off_text)])
 
     field, focused, off = (rounded_image(master, radius, f, b, w) for f, b, w in (
@@ -237,9 +241,12 @@ def apply_theme(root):
     style.map("TCombobox", fieldbackground=[("readonly", SURFACE)], selectbackground=[("readonly", SURFACE)],
               selectforeground=[("readonly", INK)], bordercolor=[("focus", BLUE)])
     style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
-    style.configure("TNotebook.Tab", background=BG, foreground=GRAY, padding=(20, 11), borderwidth=0, font=BOLD)
+    # Tabs: the idle ones have no fill and grey bold text; the open one is white with ink text and a 1 px border.
+    style.configure("TNotebook.Tab", background=BG, foreground=GRAY, padding=(20, 11), borderwidth=1, font=BOLD,
+                    bordercolor=BG, lightcolor=BG, darkcolor=BG)
     style.map("TNotebook.Tab", background=[("selected", SURFACE), ("active", "#E7ECF3")],
-              foreground=[("selected", INK), ("active", INK)])
+              foreground=[("selected", INK), ("active", INK)],
+              bordercolor=[("selected", LINE)], lightcolor=[("selected", SURFACE)], darkcolor=[("selected", LINE)])
     # Lists: no frame, taller rows, a soft blue selection.
     style.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
     style.configure("Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=INK, borderwidth=0)
