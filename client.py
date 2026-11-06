@@ -44,15 +44,29 @@ INK, GRAY, BLUE, GREEN = "#0F172A", "#64748B", "#2563EB", "#0F766E"
 BLUE_DARK, BLUE_TINT = "#1D4ED8", "#EFF6FF"
 VIOLET, VIOLET_DARK, VIOLET_TINT, VIOLET_LIGHT = "#7C3AED", "#6D28D9", "#F3EEFF", "#FAF7FF"
 BG, LINE, SELECTED = "#F1F5F9", "#E2E8F0", "#DBEAFE"       # window background, borders, selected list row
-SURFACE = "#FFFFFF"                                         # cards: the sidebar, chat area, inputs
+SURFACE = "#FFFFFF"                                         # cards: the chat area, inputs
+# The dark sidebar (and the login brand panel), so the room list reads apart from the chat.
+SIDEBAR = "#0F172A"         # sidebar + login brand panel background
+SIDEBAR_SEL = "#1E293B"     # selected sidebar row, divider lines
+SIDEBAR_LINE = "#334155"    # outline of the sidebar "Join" button, dashed icon of a group you have not joined
+SIDEBAR_TEXT = "#E2E8F0"    # normal row text on the sidebar
+SIDEBAR_MUTED = "#94A3B8"   # section labels, "(you)", "n members · joined", the status line
+ONLINE = "#22C55E"          # the presence dot on avatars
+ERROR_COLOR = "#B91C1C"     # inline error text (login). Not "ERROR": that name is the protocol's error message type
+# Chat bubbles and the blocks under them.
+BUBBLE_ME = BLUE            # my messages: white text on blue
+BUBBLE_OTHER = "#F1F5F9"    # other people's messages: dark text on light grey
+TRANSLATE_BG = "#F5F3FF"    # the translation box under a message
+SUMMARY_BG, SUMMARY_LINE = "#FAF7FF", "#E9DDFF"      # the summary card and the assistant's header
 FONT = ("Segoe UI", 11)
 BOLD = ("Segoe UI", 11, "bold")
 ITALIC = ("Segoe UI", 11, "italic")
 SMALL = ("Segoe UI", 10)
 SMALL_BOLD = ("Segoe UI", 10, "bold")
 SMALL_ITALIC = ("Segoe UI", 10, "italic")
-HEAD_FONT = ("Segoe UI", 15, "bold")
-TITLE_FONT = ("Segoe UI", 26, "bold")
+SECTION_FONT = ("Segoe UI", 9, "bold")      # sidebar section labels (written in capitals)
+HEAD_FONT = ("Segoe UI", 14, "bold")
+TITLE_FONT = ("Segoe UI", 22, "bold")
 AVATAR_COLORS = ["#0EA5E9", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899", "#14B8A6", "#6366F1"]
 
 # The tip cards on the Welcome tab: (icon, icon colour, title, help text).
@@ -92,11 +106,12 @@ def _rgb(color):
     return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
 
 
-def rounded_image(master, radius, fill, border=None, border_width=1):
+def rounded_image(master, radius, fill, border=None, border_width=1, extra=4):
     """A small rounded rectangle with soft (anti-aliased) edges, as a PhotoImage. ttk keeps its four corners
     and stretches the middle, so this one image becomes a button or text field of any size. The outside is
-    transparent, so the colour behind the widget shows around the corners."""
-    size = 2 * radius + 4                       # the four corners (radius + 1 each) plus a 2-pixel strip ttk can stretch
+    transparent, so the colour behind the widget shows around the corners. With extra=0 the image is exactly
+    two radii wide, which makes a perfect circle (used for avatars and presence dots)."""
+    size = 2 * radius + extra                   # the four corners (radius + 1 each) plus a 2-pixel strip ttk can stretch
     half = size / 2
     fill_rgb, border_rgb = _rgb(fill), _rgb(border or fill)
 
@@ -215,15 +230,20 @@ def avatar_color(name):
     return AVATAR_COLORS[sum(map(ord, name)) % len(AVATAR_COLORS)]
 
 
-def make_avatar(parent, name, background, size=32, color=None, glyph=None):
-    """A round avatar: a coloured circle with the person's initial (or `glyph`), drawn on a canvas."""
+def make_avatar(parent, name, background, size=32, color=None, glyph=None, online=False):
+    """A round avatar: a coloured circle with the person's initial (or `glyph`), drawn on a canvas.
+    With online=True a small green presence dot sits at the bottom-right, ringed in the background colour."""
     size = round(size * ui_scale(parent)) // 2 * 2          # an even size, so the circle is centred exactly
     canvas = tk.Canvas(parent, width=size, height=size, bg=background, highlightthickness=0, borderwidth=0)
     # A canvas oval has jagged edges; a rounded image with soft edges (the same trick as the buttons) is smooth.
-    canvas.disc = rounded_image(parent, size // 2 - 2, color or avatar_color(name))
+    canvas.disc = rounded_image(parent, size // 2, color or avatar_color(name), extra=0)     # a perfect circle
     canvas.create_image(size // 2, size // 2, image=canvas.disc)
     canvas.create_text(size / 2, size / 2, text=glyph or name[:1].upper(), fill="#FFFFFF",
                        font=("Segoe UI", max(size // 3, 8), "bold"))
+    if online:
+        ring = max(size // 6, 5)                                                # the dot plus its 2 px ring
+        canvas.dot = rounded_image(parent, ring, ONLINE, background, 2, extra=0)    # the ring is the background colour
+        canvas.create_image(size - ring, size - ring, image=canvas.dot)             # tucked into the bottom-right corner
     return canvas
 
 
@@ -347,7 +367,7 @@ def make_chat_window(parent):
     window.tag_configure("me", foreground=BLUE, font=BOLD)
     window.tag_configure("other", foreground=INK, font=BOLD)
     window.tag_configure("bot", foreground=VIOLET_DARK, font=BOLD)
-    window.tag_configure("stamp", foreground="#94A3B8", font=SMALL)
+    window.tag_configure("stamp", foreground=GRAY, font=SMALL)       # timestamps: #94A3B8 was too faint on white
     window.tag_configure("notice", foreground=GRAY, font=ITALIC, spacing1=8)
     window.tag_configure("note", foreground=GRAY, font=SMALL_ITALIC)
     window.tag_configure("file_line", foreground=INK, font=BOLD, lmargin1=indent, lmargin2=indent)
