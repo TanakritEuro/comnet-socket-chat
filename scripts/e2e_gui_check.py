@@ -210,8 +210,15 @@ def main():
     # R3: a second "alice" is refused and the login screen stays up for another try
     extra_window = tk.Toplevel(root)
     login = log_in(extra_window, port, "alice", apps)
-    check("R3  duplicate name shows 'already taken'", any("already taken" in p[2] for p in popups))
+    check("R3  duplicate name shows the red message under the name field",
+          wait_until(root, lambda: "“alice” is already connected" in login.name_error.cget("text")))
+    check("R3  ... with no pop-up", not any("connected" in p[2] for p in popups))
+    check("R3  ... the field is outlined red and has the focus",
+          str(login.name_entry.cget("style")) == "Error.TEntry" and login.focus_get() is login.name_entry)
     check("R3  login screen stays open to retry", login.winfo_exists())
+    login.name_entry.insert("end", "2")
+    check("R3  typing clears the error", login.name_error.cget("text") == ""
+          and str(login.name_entry.cget("style")) == "TEntry")
     extra_window.destroy()
 
     # R5-R7: double-click bob, type, Send

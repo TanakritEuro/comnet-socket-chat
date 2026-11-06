@@ -196,6 +196,13 @@ def build_skin(style, master):
                          height=round(44 * scale), sticky="nsew")
     style.layout("TEntry", [("Skin.entry", {"sticky": "nsew", "children": [
         ("Entry.padding", {"sticky": "nsew", "children": [("Entry.textarea", {"sticky": "nsew"})]})]})])
+    # The same field with a red 2 px outline, for a login error (the name is taken).
+    wrong = rounded_image(master, radius, SURFACE, ERROR_COLOR, 2)
+    _SKIN_IMAGES.append(wrong)
+    style.element_create("Skin.entryError", "image", wrong, border=radius + 1, padding=corner_padding,
+                         width=min_width, height=round(44 * scale), sticky="nsew")
+    style.layout("Error.TEntry", [("Skin.entryError", {"sticky": "nsew", "children": [
+        ("Entry.padding", {"sticky": "nsew", "children": [("Entry.textarea", {"sticky": "nsew"})]})]})])
     # The language drop-down gets the same rounded field, with its arrow on the right.
     style.layout("TCombobox", [("Skin.entry", {"sticky": "nsew", "children": [
         ("Combobox.downarrow", {"side": "right", "sticky": "ns"}),
@@ -236,6 +243,7 @@ def apply_theme(root):
     build_skin(style, root)
     style.configure("TEntry", fieldbackground=SURFACE, padding=(10, 7), foreground=INK, insertcolor=INK, font=FONT)
     style.map("TEntry", fieldbackground=[("disabled", "#F8FAFC")])
+    style.configure("Error.TEntry", fieldbackground=SURFACE, padding=(10, 7), foreground=INK, insertcolor=INK, font=FONT)
     style.configure("TCombobox", fieldbackground=SURFACE, background=SURFACE, foreground=INK, arrowcolor=VIOLET_DARK,
                     bordercolor="#CBD5E1", padding=5, lightcolor=SURFACE, darkcolor=SURFACE)
     style.map("TCombobox", fieldbackground=[("readonly", SURFACE)], selectbackground=[("readonly", SURFACE)],

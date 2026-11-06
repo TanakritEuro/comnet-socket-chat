@@ -29,9 +29,9 @@ from protocol import (
 )
 # The look and the widgets live in their own files (see CLAUDE.md for the layout).
 from ui_theme import (
-    apply_theme, BG, BLUE, BLUE_DARK, BOLD, FONT, GRAY, HEAD_FONT, INK, ONLINE, SECTION_FONT,
-    SIDEBAR, SIDEBAR_LINE, SIDEBAR_MUTED, SIDEBAR_SEL, SMALL, SMALL_BOLD, TITLE_FONT, ui_scale,
-    VIOLET, VIOLET_DARK,
+    apply_theme, BG, BLUE, BLUE_DARK, BOLD, ERROR_COLOR, FONT, GRAY, HEAD_FONT, INK, ONLINE, SECTION_FONT,
+    SIDEBAR, SIDEBAR_LINE, SIDEBAR_MUTED, SIDEBAR_SEL, SIDEBAR_TEXT, SMALL, SMALL_BOLD, TITLE_FONT,
+    ui_scale, VIOLET, VIOLET_DARK,
 )
 from ui_widgets import make_avatar, make_dot, make_square_icon, SidebarRow
 from chat_tabs import BotTab, format_size, RoomTab
@@ -51,7 +51,10 @@ WELCOME_TIPS = [("💬", "#2563EB", "Private chat", "Double-click a name under O
 
 
 class LoginFrame(ttk.Frame):
-    """Login screen: server host, port and a name. Re-prompts until the server accepts the name (R3)."""
+    """Login screen: server host, port and a name. Re-prompts until the server accepts the name (R3).
+
+    Left: a dark brand panel. Right: the form. A taken name is shown under the name field in red (R3),
+    not in a pop-up; other problems (bad port, server down) still use a message box."""
 
     def __init__(self, root, host, port, name, on_success):
         apply_theme(root)
@@ -60,30 +63,61 @@ class LoginFrame(ttk.Frame):
         self.host = tk.StringVar(value=host)
         self.port = tk.StringVar(value=str(port))
         self.name = tk.StringVar(value=name)
+        scale = ui_scale(root)
 
-        # Left: a blue brand panel. Right: the form.
-        brand = tk.Frame(self, bg=BLUE, padx=36, pady=40)
+        # Left: the navy brand panel with the logo, the tagline and three feature rows.
+        brand = tk.Frame(self, bg=SIDEBAR, width=round(320 * scale), padx=32, pady=36)
         brand.pack(side="left", fill="y")
-        make_avatar(brand, "Socket Chat", BLUE, size=64, color=BLUE_DARK, glyph="💬").pack(anchor="w")
-        tk.Label(brand, text="Socket Chat", bg=BLUE, fg="#FFFFFF", font=TITLE_FONT).pack(anchor="w", pady=(14, 0))
-        tk.Label(brand, text="Private chats, groups and AI tools,\nover plain TCP sockets.", bg=BLUE, fg="#DBEAFE",
-                 font=FONT, justify="left").pack(anchor="w", pady=(6, 30))
-        for line in ("✦   Summaries, translation and mood", "📎   Share files and images", "💬   History and unread badges"):
-            tk.Label(brand, text=line, bg=BLUE, fg="#FFFFFF", font=FONT, anchor="w").pack(fill="x", pady=5)
+        brand.pack_propagate(False)
+        tk.Label(brand, text="Computer Network · CP ENG Chula", bg=SIDEBAR, fg=SIDEBAR_MUTED, font=SMALL).pack(
+            side="bottom", anchor="w")
+        make_square_icon(brand, SIDEBAR, "💬", BLUE, size=56).pack(anchor="w")
+        tk.Label(brand, text="Socket Chat", bg=SIDEBAR, fg="#FFFFFF", font=TITLE_FONT).pack(anchor="w", pady=(16, 0))
+        tk.Label(brand, text="Private chats, groups and AI tools,\nover plain TCP sockets.", bg=SIDEBAR,
+                 fg=SIDEBAR_MUTED, font=FONT, justify="left").pack(anchor="w", pady=(6, 28))
+        for glyph, title, detail in (("✦", "AI tools", "Summaries, translation and mood"),
+                                     ("📎", "Files and images", "Up to 5 MiB per file"),
+                                     ("💬", "History and unread badges", "Pick up where the room left off")):
+            row = tk.Frame(brand, bg=SIDEBAR)
+            row.pack(fill="x", pady=8)
+            make_square_icon(row, SIDEBAR, glyph, SIDEBAR_SEL, size=36).pack(side="left", padx=(0, 12))
+            texts = tk.Frame(row, bg=SIDEBAR)
+            texts.pack(side="left")
+            tk.Label(texts, text=title, bg=SIDEBAR, fg=SIDEBAR_TEXT, font=BOLD).pack(anchor="w")
+            tk.Label(texts, text=detail, bg=SIDEBAR, fg=SIDEBAR_MUTED, font=SMALL).pack(anchor="w")
 
+        # Right: the form. Connect and its hint are packed first, at the bottom, so they are never squeezed out.
         form = ttk.Frame(self, style="White.TFrame", padding=(44, 40))
         form.pack(side="left", fill="both", expand=True)
-        ttk.Label(form, text="Welcome", style="White.TLabel", font=HEAD_FONT).pack(anchor="w")
-        ttk.Label(form, text="Connect to a chat server", style="White.TLabel", foreground=GRAY).pack(anchor="w")
-        for label, var in (("Server host / IP", self.host), ("Port", self.port), ("Your name", self.name)):
-            ttk.Label(form, text=label, style="White.TLabel", foreground=GRAY, font=SMALL_BOLD).pack(anchor="w", pady=(16, 5))
-            entry = ttk.Entry(form, textvariable=var, width=30)
-            entry.pack(fill="x")
+        ttk.Label(form, text="Press Enter to connect", style="White.TLabel", foreground=GRAY, font=SMALL).pack(
+            side="bottom", pady=(10, 0))
+        ttk.Button(form, text="Connect", style="Primary.TButton", command=self.connect).pack(side="bottom", fill="x")
+        ttk.Label(form, text="Connect to a server", style="White.TLabel", font=HEAD_FONT).pack(anchor="w")
+        ttk.Label(form, text="Ask the host for the IP and port.", style="White.TLabel", foreground=GRAY).pack(anchor="w")
+
+        # Host (wide) and port (narrow) share one row.
+        row = ttk.Frame(form, style="White.TFrame")
+        row.pack(fill="x", pady=(18, 0))
+        row.columnconfigure(0, weight=3)
+        row.columnconfigure(1, weight=1)
+        for column, (label, var) in enumerate((("Server host / IP", self.host), ("Port", self.port))):
+            ttk.Label(row, text=label, style="White.TLabel", foreground=GRAY, font=SMALL_BOLD).grid(
+                row=0, column=column, sticky="w", pady=(0, 5), padx=(0 if column == 0 else 12, 0))
+            entry = ttk.Entry(row, textvariable=var, width=8 if column else 20)
+            entry.grid(row=1, column=column, sticky="ew", padx=(0 if column == 0 else 12, 0))
             entry.bind("<Return>", lambda event: self.connect())
-        self.name_entry = entry             # the last entry created is the name box
+
+        ttk.Label(form, text="Your name", style="White.TLabel", foreground=GRAY, font=SMALL_BOLD).pack(
+            anchor="w", pady=(16, 5))
+        self.name_entry = ttk.Entry(form, textvariable=self.name)
+        self.name_entry.pack(fill="x")
+        self.name_entry.bind("<Return>", lambda event: self.connect())
+        self.name.trace_add("write", lambda *args: self.clear_name_error())   # typing a new name dismisses the error
+        self.name_error = ttk.Label(form, text="", style="White.TLabel", foreground=ERROR_COLOR,
+                                    wraplength=round(330 * scale))
+        self.name_error.pack(anchor="w", pady=(6, 0))
         self.status = ttk.Label(form, text="", style="White.TLabel", foreground=GRAY)
-        self.status.pack(anchor="w", pady=(14, 0))
-        ttk.Button(form, text="Connect", style="Primary.TButton", command=self.connect).pack(fill="x", pady=(8, 0))
+        self.status.pack(anchor="w", pady=(6, 0))
         self.name_entry.focus_set()
 
     def connect(self):
@@ -125,7 +159,7 @@ class LoginFrame(ttk.Frame):
         if reply is None:
             self.fail("The server closed the connection.")
         elif reply.get("code") == NAME_TAKEN:
-            self.fail(f"The name {name!r} is already taken. Please choose another one.")
+            self.show_name_error(f"“{name}” is already connected. Pick another name.")
         else:
             self.fail(reply.get("message", "Login failed."))
 
@@ -135,6 +169,19 @@ class LoginFrame(ttk.Frame):
         messagebox.showerror("Cannot log in", text, parent=self)
         self.name_entry.focus_set()
         self.name_entry.select_range(0, "end")
+
+    def show_name_error(self, text):
+        """R3: the name is taken. Say so in red under the name field, outline the field red, and keep the window open."""
+        self.status.config(text="")
+        self.name_error.config(text=text)
+        self.name_entry.configure(style="Error.TEntry")
+        self.name_entry.focus_set()
+        self.name_entry.select_range(0, "end")
+
+    def clear_name_error(self):
+        if self.name_error.cget("text"):
+            self.name_error.config(text="")
+            self.name_entry.configure(style="TEntry")
 
 
 def fit_to_screen(root):
@@ -755,7 +802,10 @@ def main():
         ChatApp(root, sock, name)
 
     login = LoginFrame(root, args.host, args.port, args.name, on_success=start_chat)
-    login.pack(padx=32, pady=32)            # the white card floats on the window's soft grey
+    scale = ui_scale(root)
+    root.geometry(f"{round(760 * scale)}x{round(560 * scale)}")
+    root.minsize(round(700 * scale), round(520 * scale))
+    login.pack(fill="both", expand=True)
     root.mainloop()
 
 
