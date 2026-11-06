@@ -187,7 +187,11 @@ def build_skin(style, master):
                         font=SMALL_BOLD if on_dark else (FONT if name in ("TButton", "Danger.TButton") else BOLD))
         if name == "Square.TButton":
             style.configure(name, width=0)         # ttk buttons are at least 11 characters wide unless told otherwise
-        style.map(name, foreground=[("disabled", off_text)])
+        # clam recolours a button's background on hover and press, and that colour shows in the see-through
+        # corners as light squares; keep it the same as the surface the button sits on.
+        behind = SIDEBAR if on_dark else SURFACE
+        style.map(name, foreground=[("disabled", off_text)],
+                  background=[(state, behind) for state in ("disabled", "pressed", "active", "!disabled")])
 
     field, focused, off = (rounded_image(master, radius, f, b, w) for f, b, w in (
         (SURFACE, "#CBD5E1", 1), (SURFACE, BLUE, 2), ("#F8FAFC", "#E2E8F0", 1)))
