@@ -39,7 +39,10 @@ list the models your key can use (`GET /v1beta/models`) and update `ai.py` and `
 
 ```
 server.py            # TCP server: accepts clients, routes messages, enforces privacy
-client.py            # Tkinter GUI client
+client.py            # Tkinter GUI client: login screen, ChatApp (sidebar, networking, message routing), main()
+chat_tabs.py         # the chat tabs: RoomTab (private chat / group), BotTab (AI Assistant), the chat window and its styles
+ui_widgets.py        # small drawn widgets: avatars, icons, unread pills, SidebarRow
+ui_theme.py          # colours, fonts, and the rounded buttons/fields (images drawn in code); apply_theme()
 protocol.py          # shared: send_msg / recv_msg framing, message type constants
 ai.py                # summarize(room, messages) -> (text, model)  (Gemini + offline fallback)
 tests/               # scripted socket clients that test the server headlessly

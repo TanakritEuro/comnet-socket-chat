@@ -166,7 +166,7 @@ Suggested split (adjust as needed):
 | Member | Owns |
 |---|---|
 | 1 | `protocol.py`, `server.py` core (R2–R4, R7–R11), tests |
-| 2 | `client.py` GUI (R5, R6, client side of R7–R11) |
+| 2 | GUI: `client.py`, `chat_tabs.py`, `ui_widgets.py`, `ui_theme.py` (R5, R6, client side of R7–R11) |
 | 3 | AI summarization + chat history/unread |
 | 4 | File transfer + typing/presence + architecture doc (R1) + slides |
 

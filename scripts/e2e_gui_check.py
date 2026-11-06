@@ -30,6 +30,7 @@ import tkinter as tk
 import ai
 import ai_bot
 import ai_translate
+import chat_tabs
 import client
 from protocol import DM, FILE, HELLO, MSG, SENTIMENT_RESULT, SUMMARY, TRANSLATION, recv_msg, send_msg
 from server import ChatServer
@@ -398,7 +399,7 @@ def main():
         check("S2  carol received no file", not any(m["type"] == FILE for m in raw_messages(carol)))
 
         saved = Path(folder) / "saved.txt"
-        client.filedialog.asksaveasfilename = lambda **kwargs: str(saved)     # answer the Save dialog in code
+        chat_tabs.filedialog.asksaveasfilename = lambda **kwargs: str(saved)  # answer the Save dialog in code
         bob_dm.save_file(*bob_dm.files[max(bob_dm.files)])
         check("S2  Save as… writes the same bytes", saved.read_bytes() == b"line one\nline two\n")
 
@@ -407,7 +408,7 @@ def main():
         check("S2  bob sends a PNG image", bob.send_file("dm:alice|bob", str(picture)))
         check("S2  alice's tab shows a preview image",
               wait_until(root, lambda: len(reopened.images) == 1 and reopened.window.image_names()))
-        check("S2  the preview is shrunk to fit", reopened.images[0].width() <= client.PREVIEW_PX)
+        check("S2  the preview is shrunk to fit", reopened.images[0].width() <= chat_tabs.PREVIEW_PX)
 
         before = len(popups)
         big = Path(folder) / "big.bin"
