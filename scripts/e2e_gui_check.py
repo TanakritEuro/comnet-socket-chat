@@ -30,6 +30,7 @@ import tkinter as tk
 import ai
 import ai_bot
 import ai_translate
+import chat_tabs
 import client
 from protocol import DM, FILE, HELLO, MSG, SENTIMENT_RESULT, SUMMARY, TRANSLATION, recv_msg, send_msg
 from server import ChatServer
@@ -87,7 +88,33 @@ def raw_messages(sock, quiet_time=0.3):
 
 
 def text_of(tab):
-    return tab.window.get("1.0", "end")
+    """Everything written in a chat window, in order: the text itself, plus the text inside the bubbles and
+    cards embedded in it (the label, then the labels and buttons inside a card)."""
+    def inside(widget):
+        """The text of a widget and of everything inside it, in the order they were created."""
+        found = []
+        try:
+            found.append(str(widget.cget("text")))
+        except tk.TclError:                     # an avatar or a frame has no text of its own
+            pass
+        for child in widget.winfo_children():
+            found.extend(inside(child))
+        return found
+
+    pieces = []
+    for kind, value, _ in tab.window.dump("1.0", "end", text=True, window=True):
+        pieces.append(value if kind == "text" else "\n".join(inside(tab.window.nametowidget(value))) + "\n")
+    return "".join(pieces)
+
+
+def user_texts(app):
+    """The "Online" rows of the sidebar as text, in order: ["alice (you)", "bob (2)", ...]."""
+    return [row.text() for row in app.user_rows.values()]
+
+
+def member_texts(app, group):
+    """The members listed under a group in the sidebar, e.g. ["bob (you) (creator)", "alice"]."""
+    return [row.text() for row in app.member_rows.get(group, [])]
 
 
 def make_png(width, height):
@@ -177,20 +204,25 @@ def main():
     alice, bob = apps["alice"], apps["bob"]
 
     # R4: everyone online, own name first and marked (you)
-    check("R4  alice's user list", wait_until(root, lambda: alice.user_list.get(0, "end") == ("alice (you)", "bob", "carol")))
-    check("R4  bob's user list", wait_until(root, lambda: bob.user_list.get(0, "end") == ("bob (you)", "alice", "carol")))
+    check("R4  alice's user list", wait_until(root, lambda: user_texts(alice) == ["alice (you)", "bob", "carol"]))
+    check("R4  bob's user list", wait_until(root, lambda: user_texts(bob) == ["bob (you)", "alice", "carol"]))
 
     # R3: a second "alice" is refused and the login screen stays up for another try
     extra_window = tk.Toplevel(root)
     login = log_in(extra_window, port, "alice", apps)
-    check("R3  duplicate name shows 'already taken'", any("already taken" in p[2] for p in popups))
+    check("R3  duplicate name shows the red message under the name field",
+          wait_until(root, lambda: "“alice” is already connected" in login.name_error.cget("text")))
+    check("R3  ... with no pop-up", not any("connected" in p[2] for p in popups))
+    check("R3  ... the field is outlined red and has the focus",
+          str(login.name_entry.cget("style")) == "Error.TEntry" and login.focus_get() is login.name_entry)
     check("R3  login screen stays open to retry", login.winfo_exists())
+    login.name_entry.insert("end", "2")
+    check("R3  typing clears the error", login.name_error.cget("text") == ""
+          and str(login.name_entry.cget("style")) == "TEntry")
     extra_window.destroy()
 
     # R5-R7: double-click bob, type, Send
-    alice.user_list.selection_clear(0, "end")
-    alice.user_list.selection_set(1)
-    alice.on_user_double_click(None)
+    alice.user_rows["bob"].open()                           # what a double-click on bob's row does
     dm = alice.rooms["dm:alice|bob"]
     dm.entry.insert(0, "hi bob, private")
     dm.send()
@@ -205,19 +237,18 @@ def main():
     bob.create_group()
     check("R8  bob's #net lab tab opens", wait_until(root, lambda: "group:net lab" in bob.rooms))
     check("R9  alice sees the group with 1 member",
-          wait_until(root, lambda: alice.group_tree.exists("group:net lab")
-                     and alice.group_tree.item("group:net lab", "text") == "net lab · 1 member"))
-    members = [alice.group_tree.item(i, "text") for i in alice.group_tree.get_children("group:net lab")]
-    check("R8  creator is the only member", members == ["bob (creator)"])
+          wait_until(root, lambda: "net lab" in alice.group_rows
+                     and alice.group_rows["net lab"].text() == "net lab · 1 member · not joined"))
+    check("R8  creator is the only member", member_texts(alice, "net lab") == ["bob (creator)"])
     check("R10 alice was not added automatically", "group:net lab" not in alice.rooms)
 
-    # R10: alice selects a member row of the group and presses Join
-    alice.group_tree.selection_set(alice.group_tree.get_children("group:net lab")[0])
+    # R10: alice selects the group row and presses Join
+    alice.group_rows["net lab"].click()
+    check("R9  clicking a group lists its members under it", alice.member_boxes["net lab"].winfo_manager() == "pack")
     alice.join_group()
     check("R10 alice's tab opens after Join", wait_until(root, lambda: "group:net lab" in alice.rooms))
-    check("R9  bob's tree lists both members",
-          wait_until(root, lambda: [bob.group_tree.item(i, "text") for i in bob.group_tree.get_children("group:net lab")]
-                     == ["bob (you) (creator)", "alice"]))
+    check("R9  bob's sidebar lists both members",
+          wait_until(root, lambda: member_texts(bob, "net lab") == ["bob (you) (creator)", "alice"]))
 
     # R11: group message reaches members; carol (no GUI, not a member) gets no MSG at all
     group_tab = alice.rooms["group:net lab"]
@@ -230,7 +261,7 @@ def main():
     bob_dm = bob.rooms["dm:alice|bob"]
     alice_ts = next(iter(bob_dm.by_ts))
     check("AI  sidebar shows the Assistant row and the user count",
-          "AI Assistant" in alice.assistant_list.get(0) and alice.users_label.cget("text").startswith("ONLINE USERS · 3"))
+          "AI Assistant" in alice.assistant_row.text() and alice.users_label.cget("text") == "ONLINE · 3")
     check("AI  group tab header lists the members", "bob (creator)" in group_tab.subtitle.cget("text"))
     check("AI  own message has an Analyze mood button but no Translate link",
           bool(dm.window.tag_ranges("mood_button")) and not dm.window.tag_ranges("link"))
@@ -250,10 +281,10 @@ def main():
     # Translation: a real click, a real TRANSLATE to the server, and a fake translator in place of Gemini.
     click(bob_dm, "link")
     check("AI  clicking Translate shows the translation under the message",
-          wait_until(root, lambda: "Translated · Thai → English" in text_of(bob_dm) and "[en] " in text_of(bob_dm)))
+          wait_until(root, lambda: "THAI → ENGLISH" in text_of(bob_dm) and "[en] " in text_of(bob_dm)))
     check("AI  the Translate link is replaced by the result", not bob_dm.window.tag_ranges("link"))
     check("AI  the translation is private to bob",
-          "Translated" not in text_of(dm) and not any(m["type"] == TRANSLATION for m in raw_messages(carol)))
+          "THAI → ENGLISH" not in text_of(dm) and not any(m["type"] == TRANSLATION for m in raw_messages(carol)))
     bob_dm.language_box.current(2)                                     # Japanese: the fake translator fails for it
     bob_dm.translate(alice_ts)
     check("AI  a failed translation shows an error with Try again, not a pop-up",
@@ -261,7 +292,7 @@ def main():
           and not any(p[1] == "AI_FAILED" for p in popups))
     bob_dm.language_box.current(0)                                     # back to English
     click(bob_dm, "link")                                              # click Try again
-    check("AI  Try again works", wait_until(root, lambda: "Translated · Thai → English" in text_of(bob_dm))
+    check("AI  Try again works", wait_until(root, lambda: "THAI → ENGLISH" in text_of(bob_dm))
           and "Couldn't translate" not in text_of(bob_dm))
 
     # Sentiment: a real click on Analyze mood, a real SENTIMENT to the server, and a fake analyzer in place of Gemini.
@@ -309,11 +340,11 @@ def main():
     check("S1  Summarize button disables while waiting", group_tab.summarize_button.instate(["disabled"]))
     check("S1  summary appears in alice's group tab",
           wait_until(root, lambda: "Offline summary · no AI was used" in text_of(group_tab)))
-    check("S1  summary is a marked system block", bool(group_tab.window.tag_ranges("summary_title")))
+    check("S1  summary is a card with a title", "✦ Summary of this chat" in text_of(group_tab))
     check("S1  summary describes the room", "1 message from 1 person: alice" in text_of(group_tab))
     check("S1  Summarize button is enabled again", group_tab.summarize_button.instate(["!disabled"]))
     wait_until(root, lambda: False, timeout=0.3)
-    check("S1  bob's window shows no summary", "Summary of this room" not in text_of(bob.rooms["group:net lab"]))
+    check("S1  bob's window shows no summary", "Summary of this chat" not in text_of(bob.rooms["group:net lab"]))
     check("S1  carol received no SUMMARY", not any(m["type"] == SUMMARY for m in raw_messages(carol)))
 
     # Server errors reach the user
@@ -321,8 +352,7 @@ def main():
     check("ERR duplicate group shows GROUP_EXISTS", wait_until(root, lambda: any(p[1] == "GROUP_EXISTS" for p in popups)))
 
     # Special 3: unread badges. alice looks at the group tab while bob writes to her privately.
-    def users_of(app):
-        return app.user_list.get(0, "end")
+    users_of = user_texts
 
     def tab_title(app, tab):
         return app.notebook.tab(tab, "text")
@@ -344,17 +374,17 @@ def main():
     bob_group = bob.rooms["group:net lab"]
     bob_group.entry.insert(0, "group ping")
     bob_group.send()
-    check("S3  unread group shows 'net lab (1)' in the groups tree",
-          wait_until(root, lambda: alice.group_tree.item("group:net lab", "text").startswith("net lab (1) · ")))
+    check("S3  unread group shows 'net lab (1)' in the sidebar",
+          wait_until(root, lambda: alice.group_rows["net lab"].text().startswith("net lab (1) · ")))
     check("S3  ... and on the #net lab tab title", tab_title(alice, group_tab) == "#net lab (1)")
     group_tab.entry.insert(0, "my own message")
     group_tab.send()
     wait_until(root, lambda: "my own message" in text_of(group_tab))
     check("S3  own messages never count", tab_title(alice, group_tab) == "#net lab (1)")
     alice.notebook.select(group_tab)
-    check("S3  viewing the group clears tree and tab",
+    check("S3  viewing the group clears sidebar and tab",
           wait_until(root, lambda: tab_title(alice, group_tab) == "#net lab"
-                     and alice.group_tree.item("group:net lab", "text") == "net lab · 2 members · ✓ joined"))
+                     and alice.group_rows["net lab"].text() == "net lab · 2 members · joined"))
 
     # A message for a room whose tab isn't open yet still counts, and is shown exactly once.
     send_msg(carol, {"type": DM, "to": "alice", "text": "hi from carol"})
@@ -367,9 +397,7 @@ def main():
 
     # Special 3: history. alice closes the @bob tab and opens it again.
     alice.close_room("dm:alice|bob")
-    alice.user_list.selection_clear(0, "end")
-    alice.user_list.selection_set(alice.users.index("bob"))
-    alice.on_user_double_click(None)
+    alice.user_rows["bob"].open()
     reopened = alice.rooms["dm:alice|bob"]
     check("S3  history appears after reopening a tab",
           wait_until(root, lambda: "hi bob, private" in text_of(reopened) and "hello?" in text_of(reopened)))
@@ -388,13 +416,13 @@ def main():
         notes.write_bytes(b"line one\nline two\n")
         check("S2  alice sends a text file", alice.send_file("dm:alice|bob", str(notes)))
         check("S2  it appears in alice's own tab (echo)",
-              wait_until(root, lambda: "notes.txt" in text_of(reopened) and "Save as…" in text_of(reopened)))
+              wait_until(root, lambda: "notes.txt" in text_of(reopened) and "Save" in text_of(reopened)))
         check("S2  it appears in bob's tab with its size",
               wait_until(root, lambda: "notes.txt" in text_of(bob_dm) and "18 B" in text_of(bob_dm)))
         check("S2  carol received no file", not any(m["type"] == FILE for m in raw_messages(carol)))
 
         saved = Path(folder) / "saved.txt"
-        client.filedialog.asksaveasfilename = lambda **kwargs: str(saved)     # answer the Save dialog in code
+        chat_tabs.filedialog.asksaveasfilename = lambda **kwargs: str(saved)  # answer the Save dialog in code
         bob_dm.save_file(*bob_dm.files[max(bob_dm.files)])
         check("S2  Save as… writes the same bytes", saved.read_bytes() == b"line one\nline two\n")
 
@@ -403,7 +431,7 @@ def main():
         check("S2  bob sends a PNG image", bob.send_file("dm:alice|bob", str(picture)))
         check("S2  alice's tab shows a preview image",
               wait_until(root, lambda: len(reopened.images) == 1 and reopened.window.image_names()))
-        check("S2  the preview is shrunk to fit", reopened.images[0].width() <= client.PREVIEW_PX)
+        check("S2  the preview is shrunk to fit", reopened.images[0].width() <= chat_tabs.PREVIEW_PX)
 
         before = len(popups)
         big = Path(folder) / "big.bin"
@@ -414,15 +442,14 @@ def main():
 
         # History: the server keeps files as metadata only, so reopening the tab shows name and size, no bytes.
         alice.close_room("dm:alice|bob")
-        alice.user_list.selection_clear(0, "end")
-        alice.user_list.selection_set(alice.users.index("bob"))
-        alice.on_user_double_click(None)
+        alice.user_rows["bob"].open()
         again = alice.rooms["dm:alice|bob"]
         check("S2  files come back from history as name and size only",
-              wait_until(root, lambda: "📎 notes.txt (18 B) — sent earlier, not stored on the server" in text_of(again)
-                         and "📎 picture.png (" in text_of(again)))
-        check("S2  ... with no Save link and no preview (the server didn't keep the bytes)",
-              "Save as…" not in text_of(again) and not again.images and not again.files)
+              wait_until(root, lambda: "notes.txt" in text_of(again) and "18 B" in text_of(again)
+                         and "picture.png" in text_of(again)
+                         and text_of(again).count("Sent earlier · not stored on the server") == 2))
+        check("S2  ... with no Save button and no preview (the server didn't keep the bytes)",
+              "Save" not in text_of(again) and not again.images and not again.files)
 
     if args.screenshot:
         alice.notebook.select(group_tab)
@@ -433,15 +460,15 @@ def main():
         wait_until(root, lambda: False, timeout=0.5)
         screenshot([root, bob_window], args.screenshot)
 
-    # Leave closes the tab
-    alice.group_tree.selection_set("group:net lab")
-    alice.leave_group()
+    # Leave is a button in a group's header (a private chat has none) and it closes the tab
+    check("R10 only a group's header has a Leave button", reopened.leave_button is None and group_tab.leave_button is not None)
+    group_tab.leave_button.invoke()
     check("R10 Leave closes alice's group tab", wait_until(root, lambda: "group:net lab" not in alice.rooms))
 
     # Closing a window updates everyone's user list
     bob.quit()
     check("R4  list updates when bob closes his window",
-          wait_until(root, lambda: alice.user_list.get(0, "end") == ("alice (you)", "carol")))
+          wait_until(root, lambda: user_texts(alice) == ["alice (you)", "carol"]))
 
     # Special 3: bob logs in again with the same name. His group tab reopens with its history,
     # and so does his private chat with alice when he opens it.
@@ -449,9 +476,8 @@ def main():
     bob = apps["bob"]
     check("S3  group tab reopens with its history after a reconnect",
           wait_until(root, lambda: "group:net lab" in bob.rooms and "hello group" in text_of(bob.rooms["group:net lab"])))
-    wait_until(root, lambda: "alice" in bob.users)
-    bob.user_list.selection_set(bob.users.index("alice"))
-    bob.on_user_double_click(None)
+    wait_until(root, lambda: "alice" in bob.user_rows)
+    bob.user_rows["alice"].open()
     check("S3  DM history survives a reconnect",
           wait_until(root, lambda: "new after reopen" in text_of(bob.rooms["dm:alice|bob"])))
     bob.quit()

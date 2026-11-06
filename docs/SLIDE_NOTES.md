@@ -195,6 +195,24 @@ traced to broken IPv6 on the dev machine, and `ai.py` now tries IPv4 first.)
 (Claude Code used a per-connection send **queue with its own writer thread** instead of a per-socket send lock, because a send lock
 taken after releasing the global lock can't keep the per-socket order; see "Q&A prep: concurrency".)
 
+**Prompt P14** (modern UI, PR `feat/modern-ui`):
+
+> can u create new branch to improve the ui of this app make it look modern pls
+> (use as much limit as u want, i want this app to look more beautiful and modern. i give you max 1 hr to do it pls)
+
+(Claude Code kept the app standard-library only, because an earlier try with the `ttkbootstrap` library was rejected; the rounded look
+is drawn in code instead. Networking and protocol code are unchanged.)
+
+**Prompt P15** (restyle the client to a design, same branch `feat/modern-ui`):
+
+> Restyle the Tkinter client (client.py) to match the design in ../ui-design/. First read ../ui-design/CLAUDE.md completely and look at every
+> image in ../ui-design/screens/. ... Then do the work in these steps. After EACH step: run the unit tests and `scripts/e2e_gui_check.py`, fix
+> anything that broke, commit with a clear message, and stop so I can try the app. 1. Tokens 2. Sidebar 3. Room header 4. Messages 5. Tabs and
+> composer 6. Login. If something in the design is too hard or risky in plain Tkinter, tell me and suggest the simplest version that still looks
+> close. Don't silently skip it. Finally, update docs/SLIDE_NOTES.md with one short entry about the UI redesign.
+
+(The full wording is in the chat history; the six steps are the six commits "UI redesign 1/6" to "6/6".)
+
 ## R1: System architecture
 Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides are in [`docs/diagrams/`](diagrams/)
 (re-render with `python scripts/render_diagrams.py` after editing the Mermaid blocks).
@@ -266,8 +284,8 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
 - **How:** Each `RoomTab` has a read-only `ScrolledText` chat window (`state="disabled"`, unlocked for a moment to append) and
   an `Entry` + **Send** button (Enter also sends). Your own message appears when the server echoes it back, so what you
   see is what the server actually delivered.
-- **Code snapshot (mandatory):** `client.py` → `RoomTab.__init__` (L257–303)
-- **Code snapshot 2:** `client.py` → `RoomTab.send` / `add_message` (L311–344) and `append` (L516–517)
+- **Code snapshot (mandatory):** `chat_tabs.py` → `RoomTab.__init__` (L134–)
+- **Code snapshot 2:** `chat_tabs.py` → `RoomTab.send` / `add_message` (L221–) and `append`
 - **AI prompt:** P2
 
 ## Client threading (R2 Q&A, and why the GUI never freezes)
@@ -355,7 +373,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   so the demo never breaks.
 - **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_summarize` + `summarize_worker` + `visible_since` (L522–753)
 - **Code snapshot 2:** `ai.py` → `summarize` (L110–131: model fallback loop) and `call_gemini` (L152–172: the HTTPS request, key in the `x-goog-api-key` header)
-- **Code snapshot 3:** `client.py` → `RoomTab.summarize` + `add_summary` (L488–503); `server.py` → `MessageBuffer` (L45–84: `deque(maxlen=200)` per room since special 3; the AI reads the newest 50)
+- **Code snapshot 3:** `chat_tabs.py` → `RoomTab.summarize` + `add_summary` (L387–); `server.py` → `MessageBuffer` (L45–84: `deque(maxlen=200)` per room since special 3; the AI reads the newest 50)
 - **AI model:** a chain of Google Gemini models, tried in order until one answers: **Gemini 3.5 Flash-Lite**
   (`gemini-3.5-flash-lite`) → **Gemini 3.1 Flash-Lite** (`gemini-3.1-flash-lite`) → **Gemini 3.8 Flash** (`gemini-3.8-flash`) →
   **Gemini 3 Flash** (`gemini-3-flash-preview`) → **Gemini 2.5 Flash-Lite** → **Gemini 2.5 Flash**. We found the IDs by calling
@@ -380,15 +398,48 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   plug-in points, and each feature owner replaces the stub with a `send(...)` and an `on_<reply>` handler that calls the tab's result
   methods (`add_translation`, `set_mood`, `add_reply`, …). This section is the screen as first built, with every button a stub that
   said "… isn't available yet"; all three features are done now, see "AI chatbot", "AI translation" and "AI sentiment analysis" below.
-- **Code snapshot (mandatory):** `client.py` → `RoomTab.add_message` + `insert_slot` + `replace_slot` (L328–425). A *slot* is a
+- **Code snapshot (mandatory):** `chat_tabs.py` → `RoomTab.add_message` + `insert_slot` + `replace_slot` (L221–). A *slot* is a
   tagged stretch of text in the `Text` widget that can be swapped as a whole, so a result lands under the right message even when
   newer messages have arrived.
-- **Code snapshot 2:** `client.py` → `BotTab` (L520–626), `ChatApp.translate_message` … `clear_bot` (L1072–1093)
+- **Code snapshot 2:** `chat_tabs.py` → `BotTab` (L423–); `client.py` → `ChatApp.translate_message` … `clear_bot`
 - **Talking points:** Tkinter is not thread-safe, so results still arrive through the receiver thread → queue → `poll_inbox`;
   nothing in the UI calls the network except through `ChatApp.send`; the chat windows are always light so tinted AI blocks stay readable.
 - **Proof:** `scripts/e2e_gui_check.py` (checks labelled `AI`): the controls exist, and a real click on the Translate link and on the
   Analyze mood button works through the real server (with fake AI) in every result state.
 - **AI prompt:** P5
+## Modern look (UI only, no protocol change)
+- **How:** One colour palette (blue accent, violet for "AI", slate greys) and larger type are defined as constants at the top of
+  `ui_theme.py`. The buttons and text fields are **rounded**, which plain Tkinter can't do, so the code draws small rounded rectangles
+  with soft edges (`rounded_image`, which also writes the PNG bytes by hand with `struct` and `zlib`) and registers them as ttk
+  *image elements*; ttk stretches the middle and keeps the corners, so one image makes a button of any size. The widgets are still
+  ordinary `ttk.Button` / `ttk.Entry`, so `.state()`, `.invoke()` and every test keep working. Messages are laid out like Slack: a round
+  **avatar** (a canvas embedded in the chat text), the name and time, and the text indented under the name. The login screen is a
+  blue brand panel next to the form, the sidebar has a profile header and three equal buttons, and the Welcome tab shows tip cards.
+  Everything scales with the Windows display scaling (`ui_scale`).
+- **Code snapshot (mandatory):** `ui_theme.py` → `rounded_image` (L71–), `build_skin` (L131–) and `apply_theme` (L164–): the rounded buttons
+  and fields, the tab, list and scroll-bar styles
+- **Code snapshot 2:** `chat_tabs.py` → `make_chat_window` (L30–: the message tags, `indent`) and `add_avatar` (L98–), `RoomTab.add_message` (L221–)
+- **Code snapshot 3:** `client.py` → `LoginFrame` (L53–) and `ChatApp.build_widgets` (L186–); `ui_widgets.py` → `SidebarRow` (L64–)
+- **Talking points:** no new dependency (a library like `ttkbootstrap` would have to be installed on every PC before the demo);
+  the look is separate from the networking, so the receiver-thread → queue → `poll_inbox` design is untouched; avatars are one character
+  of the `Text` widget, so the per-message AI controls (slots and tags) work exactly as before.
+- **Proof:** `python scripts/e2e_gui_check.py` (all checks still pass: the widgets keep their names and behaviour) and the unit tests.
+- **AI prompt:** P14
+
+## UI redesign (client matches the design in ui-design/)
+- **How:** The six design steps were done as six commits: colour/font tokens, a dark navy sidebar, a room header with Translate / Summarize / Leave,
+  chat bubbles, tabs with a composer, and a new login screen. A **bubble** is a `ttk.Label` drawn on a rounded image (the same
+  `rounded_image` trick as the buttons) embedded in the chat `Text`; it wraps at 70 % of the window and re-wraps 120 ms after a resize stops.
+  Mood chips, translation boxes and summary cards go in at *marks* saved when the message was added. A taken name (R3) now shows a red message
+  under the name field instead of a pop-up. The 1500-line `client.py` was split into `ui_theme.py`, `ui_widgets.py`, `chat_tabs.py` and `client.py`.
+- **Code snapshot (mandatory):** `chat_tabs.py` → `Bubbles.make_bubble` / `embed` and `RoomTab.add_message`; `ui_theme.py` → `build_skin`
+- **Code snapshot 2:** `client.py` → `LoginFrame.show_name_error` (R3 inline error)
+- **Talking points:** ttk stretches the middle of an image by *tiling* it, so a 2 px middle made resizing take seconds (fixed with a 120 px strip
+  and by drawing only the corners); Tk images must never be freed from the receiver thread; text in a label can't be selected, so a right-click
+  offers Copy. Compromises: unread count is text "(2)" in the tab label, not a blue circle; tabs are flat (ttk can't colour one tab differently).
+- **Proof:** unit tests (177) and `scripts/e2e_gui_check.py` (83 checks, including the inline R3 error)
+- **AI prompt:** P15
+
 ## AI chatbot (AI Assistant tab)
 - **How:** Double-click **AI Assistant** in the sidebar. A question sends `BOT_ASK {text, room?}`. The server first checks the text is not
   blank and that this user has no question in progress (`BUSY`). If a `room` is given ("Explain my last chat") it runs the same
@@ -493,8 +544,8 @@ Full write-up: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md). PNGs for the slides ar
   libraries; JPEG would need Pillow, so a JPEG shows as a normal file).
 - **Code snapshot (mandatory):** `server.py` → `ChatServer.handle_file` (L456–499: room check, name cleaning, base64 decode, size
   limit, delivery to the room's people only)
-- **Code snapshot 2:** `client.py` → `ChatApp.send_file` (L1008–1028: read, limit check, base64, `FILE`), `RoomTab.add_file` +
-  `add_preview` + `save_file` (L372–402: the file line, the preview, saving the decoded bytes)
+- **Code snapshot 2:** `client.py` → `ChatApp.send_file` (L1008–1028: read, limit check, base64, `FILE`), `chat_tabs.py` → `RoomTab.add_file` +
+  `add_preview` + `save_file` (L240–: the file line, the preview, saving the decoded bytes)
 - **Code snapshot 3:** `server.py` → `MessageBuffer.add` (L57–64: a file is kept in history as metadata only, without its bytes);
   `protocol.py` → `clean_filename` (L160–171: `"..\\..\\evil.exe"` becomes `"evil.exe"`)
 - **Talking points:** it is still plain TCP sockets, with no HTTP upload; the server never trusts the client (the real size is measured
