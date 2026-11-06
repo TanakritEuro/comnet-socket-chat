@@ -88,7 +88,23 @@ def raw_messages(sock, quiet_time=0.3):
 
 
 def text_of(tab):
-    return tab.window.get("1.0", "end")
+    """Everything written in a chat window, in order: the text itself, plus the text inside the bubbles and
+    cards embedded in it (the label, then the labels and buttons inside a card)."""
+    def inside(widget):
+        """The text of a widget and of everything inside it, in the order they were created."""
+        found = []
+        try:
+            found.append(str(widget.cget("text")))
+        except tk.TclError:                     # an avatar or a frame has no text of its own
+            pass
+        for child in widget.winfo_children():
+            found.extend(inside(child))
+        return found
+
+    pieces = []
+    for kind, value, _ in tab.window.dump("1.0", "end", text=True, window=True):
+        pieces.append(value if kind == "text" else "\n".join(inside(tab.window.nametowidget(value))) + "\n")
+    return "".join(pieces)
 
 
 def user_texts(app):
@@ -258,10 +274,10 @@ def main():
     # Translation: a real click, a real TRANSLATE to the server, and a fake translator in place of Gemini.
     click(bob_dm, "link")
     check("AI  clicking Translate shows the translation under the message",
-          wait_until(root, lambda: "Translated · Thai → English" in text_of(bob_dm) and "[en] " in text_of(bob_dm)))
+          wait_until(root, lambda: "THAI → ENGLISH" in text_of(bob_dm) and "[en] " in text_of(bob_dm)))
     check("AI  the Translate link is replaced by the result", not bob_dm.window.tag_ranges("link"))
     check("AI  the translation is private to bob",
-          "Translated" not in text_of(dm) and not any(m["type"] == TRANSLATION for m in raw_messages(carol)))
+          "THAI → ENGLISH" not in text_of(dm) and not any(m["type"] == TRANSLATION for m in raw_messages(carol)))
     bob_dm.language_box.current(2)                                     # Japanese: the fake translator fails for it
     bob_dm.translate(alice_ts)
     check("AI  a failed translation shows an error with Try again, not a pop-up",
@@ -269,7 +285,7 @@ def main():
           and not any(p[1] == "AI_FAILED" for p in popups))
     bob_dm.language_box.current(0)                                     # back to English
     click(bob_dm, "link")                                              # click Try again
-    check("AI  Try again works", wait_until(root, lambda: "Translated · Thai → English" in text_of(bob_dm))
+    check("AI  Try again works", wait_until(root, lambda: "THAI → ENGLISH" in text_of(bob_dm))
           and "Couldn't translate" not in text_of(bob_dm))
 
     # Sentiment: a real click on Analyze mood, a real SENTIMENT to the server, and a fake analyzer in place of Gemini.
@@ -317,11 +333,11 @@ def main():
     check("S1  Summarize button disables while waiting", group_tab.summarize_button.instate(["disabled"]))
     check("S1  summary appears in alice's group tab",
           wait_until(root, lambda: "Offline summary · no AI was used" in text_of(group_tab)))
-    check("S1  summary is a marked system block", bool(group_tab.window.tag_ranges("summary_title")))
+    check("S1  summary is a card with a title", "✦ Summary of this chat" in text_of(group_tab))
     check("S1  summary describes the room", "1 message from 1 person: alice" in text_of(group_tab))
     check("S1  Summarize button is enabled again", group_tab.summarize_button.instate(["!disabled"]))
     wait_until(root, lambda: False, timeout=0.3)
-    check("S1  bob's window shows no summary", "Summary of this room" not in text_of(bob.rooms["group:net lab"]))
+    check("S1  bob's window shows no summary", "Summary of this chat" not in text_of(bob.rooms["group:net lab"]))
     check("S1  carol received no SUMMARY", not any(m["type"] == SUMMARY for m in raw_messages(carol)))
 
     # Server errors reach the user
@@ -393,7 +409,7 @@ def main():
         notes.write_bytes(b"line one\nline two\n")
         check("S2  alice sends a text file", alice.send_file("dm:alice|bob", str(notes)))
         check("S2  it appears in alice's own tab (echo)",
-              wait_until(root, lambda: "notes.txt" in text_of(reopened) and "Save as…" in text_of(reopened)))
+              wait_until(root, lambda: "notes.txt" in text_of(reopened) and "Save" in text_of(reopened)))
         check("S2  it appears in bob's tab with its size",
               wait_until(root, lambda: "notes.txt" in text_of(bob_dm) and "18 B" in text_of(bob_dm)))
         check("S2  carol received no file", not any(m["type"] == FILE for m in raw_messages(carol)))
@@ -422,10 +438,11 @@ def main():
         alice.user_rows["bob"].open()
         again = alice.rooms["dm:alice|bob"]
         check("S2  files come back from history as name and size only",
-              wait_until(root, lambda: "📎 notes.txt (18 B) — sent earlier, not stored on the server" in text_of(again)
-                         and "📎 picture.png (" in text_of(again)))
-        check("S2  ... with no Save link and no preview (the server didn't keep the bytes)",
-              "Save as…" not in text_of(again) and not again.images and not again.files)
+              wait_until(root, lambda: "notes.txt" in text_of(again) and "18 B" in text_of(again)
+                         and "picture.png" in text_of(again)
+                         and text_of(again).count("Sent earlier · not stored on the server") == 2))
+        check("S2  ... with no Save button and no preview (the server didn't keep the bytes)",
+              "Save" not in text_of(again) and not again.images and not again.files)
 
     if args.screenshot:
         alice.notebook.select(group_tab)

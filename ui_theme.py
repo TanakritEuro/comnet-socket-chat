@@ -197,6 +197,19 @@ def build_skin(style, master):
         ("Combobox.downarrow", {"side": "right", "sticky": "ns"}),
         ("Combobox.padding", {"expand": "1", "sticky": "nsew", "children": [("Combobox.textarea", {"sticky": "nsew"})]})]})])
 
+    # Chat bubbles: labels drawn on a rounded image. The minimum size is just the two corners, so a bubble
+    # hugs its text however short it is; mine are blue with white text, other people's light grey.
+    bubble_radius = round(14 * scale)
+    for style_name, fill, text_color in (("BubbleMe.TLabel", BUBBLE_ME, "#FFFFFF"), ("BubbleOther.TLabel", BUBBLE_OTHER, INK)):
+        image = rounded_image(master, bubble_radius, fill)
+        _SKIN_IMAGES.append(image)
+        style.element_create(f"Skin.{style_name}", "image", image, border=bubble_radius + 1, padding=(0, 0, 0, 0),
+                             width=2 * (bubble_radius + 1), height=2 * (bubble_radius + 1), sticky="nsew")
+        style.layout(style_name, [(f"Skin.{style_name}", {"sticky": "nsew", "children": [
+            ("Label.padding", {"sticky": "nsew", "children": [("Label.label", {"sticky": "nsew"})]})]})])
+        style.configure(style_name, foreground=text_color, background=SURFACE, font=FONT,
+                        padding=(round(14 * scale), round(9 * scale)))
+
 
 def apply_theme(root):
     """Give every ttk widget the modern light look. The "clam" theme is the base because the native
