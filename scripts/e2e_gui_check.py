@@ -90,6 +90,16 @@ def text_of(tab):
     return tab.window.get("1.0", "end")
 
 
+def user_texts(app):
+    """The "Online" rows of the sidebar as text, in order: ["alice (you)", "bob (2)", ...]."""
+    return [row.text() for row in app.user_rows.values()]
+
+
+def member_texts(app, group):
+    """The members listed under a group in the sidebar, e.g. ["bob (you) (creator)", "alice"]."""
+    return [row.text() for row in app.member_rows.get(group, [])]
+
+
 def make_png(width, height):
     """The bytes of a plain grey PNG, built by hand so the check needs no image library."""
     def chunk(kind, body):
@@ -177,8 +187,8 @@ def main():
     alice, bob = apps["alice"], apps["bob"]
 
     # R4: everyone online, own name first and marked (you)
-    check("R4  alice's user list", wait_until(root, lambda: alice.user_list.get(0, "end") == ("alice (you)", "bob", "carol")))
-    check("R4  bob's user list", wait_until(root, lambda: bob.user_list.get(0, "end") == ("bob (you)", "alice", "carol")))
+    check("R4  alice's user list", wait_until(root, lambda: user_texts(alice) == ["alice (you)", "bob", "carol"]))
+    check("R4  bob's user list", wait_until(root, lambda: user_texts(bob) == ["bob (you)", "alice", "carol"]))
 
     # R3: a second "alice" is refused and the login screen stays up for another try
     extra_window = tk.Toplevel(root)
@@ -188,9 +198,7 @@ def main():
     extra_window.destroy()
 
     # R5-R7: double-click bob, type, Send
-    alice.user_list.selection_clear(0, "end")
-    alice.user_list.selection_set(1)
-    alice.on_user_double_click(None)
+    alice.user_rows["bob"].open()                           # what a double-click on bob's row does
     dm = alice.rooms["dm:alice|bob"]
     dm.entry.insert(0, "hi bob, private")
     dm.send()
@@ -205,19 +213,18 @@ def main():
     bob.create_group()
     check("R8  bob's #net lab tab opens", wait_until(root, lambda: "group:net lab" in bob.rooms))
     check("R9  alice sees the group with 1 member",
-          wait_until(root, lambda: alice.group_tree.exists("group:net lab")
-                     and alice.group_tree.item("group:net lab", "text") == "net lab · 1 member"))
-    members = [alice.group_tree.item(i, "text") for i in alice.group_tree.get_children("group:net lab")]
-    check("R8  creator is the only member", members == ["bob (creator)"])
+          wait_until(root, lambda: "net lab" in alice.group_rows
+                     and alice.group_rows["net lab"].text() == "net lab · 1 member · not joined"))
+    check("R8  creator is the only member", member_texts(alice, "net lab") == ["bob (creator)"])
     check("R10 alice was not added automatically", "group:net lab" not in alice.rooms)
 
-    # R10: alice selects a member row of the group and presses Join
-    alice.group_tree.selection_set(alice.group_tree.get_children("group:net lab")[0])
+    # R10: alice selects the group row and presses Join
+    alice.group_rows["net lab"].click()
+    check("R9  clicking a group lists its members under it", alice.member_boxes["net lab"].winfo_manager() == "pack")
     alice.join_group()
     check("R10 alice's tab opens after Join", wait_until(root, lambda: "group:net lab" in alice.rooms))
-    check("R9  bob's tree lists both members",
-          wait_until(root, lambda: [bob.group_tree.item(i, "text") for i in bob.group_tree.get_children("group:net lab")]
-                     == ["bob (you) (creator)", "alice"]))
+    check("R9  bob's sidebar lists both members",
+          wait_until(root, lambda: member_texts(bob, "net lab") == ["bob (you) (creator)", "alice"]))
 
     # R11: group message reaches members; carol (no GUI, not a member) gets no MSG at all
     group_tab = alice.rooms["group:net lab"]
@@ -230,7 +237,7 @@ def main():
     bob_dm = bob.rooms["dm:alice|bob"]
     alice_ts = next(iter(bob_dm.by_ts))
     check("AI  sidebar shows the Assistant row and the user count",
-          "AI Assistant" in alice.assistant_list.get(0) and alice.users_label.cget("text").startswith("ONLINE USERS · 3"))
+          "AI Assistant" in alice.assistant_row.text() and alice.users_label.cget("text") == "ONLINE · 3")
     check("AI  group tab header lists the members", "bob (creator)" in group_tab.subtitle.cget("text"))
     check("AI  own message has an Analyze mood button but no Translate link",
           bool(dm.window.tag_ranges("mood_button")) and not dm.window.tag_ranges("link"))
@@ -321,8 +328,7 @@ def main():
     check("ERR duplicate group shows GROUP_EXISTS", wait_until(root, lambda: any(p[1] == "GROUP_EXISTS" for p in popups)))
 
     # Special 3: unread badges. alice looks at the group tab while bob writes to her privately.
-    def users_of(app):
-        return app.user_list.get(0, "end")
+    users_of = user_texts
 
     def tab_title(app, tab):
         return app.notebook.tab(tab, "text")
@@ -344,17 +350,17 @@ def main():
     bob_group = bob.rooms["group:net lab"]
     bob_group.entry.insert(0, "group ping")
     bob_group.send()
-    check("S3  unread group shows 'net lab (1)' in the groups tree",
-          wait_until(root, lambda: alice.group_tree.item("group:net lab", "text").startswith("net lab (1) · ")))
+    check("S3  unread group shows 'net lab (1)' in the sidebar",
+          wait_until(root, lambda: alice.group_rows["net lab"].text().startswith("net lab (1) · ")))
     check("S3  ... and on the #net lab tab title", tab_title(alice, group_tab) == "#net lab (1)")
     group_tab.entry.insert(0, "my own message")
     group_tab.send()
     wait_until(root, lambda: "my own message" in text_of(group_tab))
     check("S3  own messages never count", tab_title(alice, group_tab) == "#net lab (1)")
     alice.notebook.select(group_tab)
-    check("S3  viewing the group clears tree and tab",
+    check("S3  viewing the group clears sidebar and tab",
           wait_until(root, lambda: tab_title(alice, group_tab) == "#net lab"
-                     and alice.group_tree.item("group:net lab", "text") == "net lab · 2 members · ✓ joined"))
+                     and alice.group_rows["net lab"].text() == "net lab · 2 members · joined"))
 
     # A message for a room whose tab isn't open yet still counts, and is shown exactly once.
     send_msg(carol, {"type": DM, "to": "alice", "text": "hi from carol"})
@@ -367,9 +373,7 @@ def main():
 
     # Special 3: history. alice closes the @bob tab and opens it again.
     alice.close_room("dm:alice|bob")
-    alice.user_list.selection_clear(0, "end")
-    alice.user_list.selection_set(alice.users.index("bob"))
-    alice.on_user_double_click(None)
+    alice.user_rows["bob"].open()
     reopened = alice.rooms["dm:alice|bob"]
     check("S3  history appears after reopening a tab",
           wait_until(root, lambda: "hi bob, private" in text_of(reopened) and "hello?" in text_of(reopened)))
@@ -414,9 +418,7 @@ def main():
 
         # History: the server keeps files as metadata only, so reopening the tab shows name and size, no bytes.
         alice.close_room("dm:alice|bob")
-        alice.user_list.selection_clear(0, "end")
-        alice.user_list.selection_set(alice.users.index("bob"))
-        alice.on_user_double_click(None)
+        alice.user_rows["bob"].open()
         again = alice.rooms["dm:alice|bob"]
         check("S2  files come back from history as name and size only",
               wait_until(root, lambda: "📎 notes.txt (18 B) — sent earlier, not stored on the server" in text_of(again)
@@ -434,14 +436,14 @@ def main():
         screenshot([root, bob_window], args.screenshot)
 
     # Leave closes the tab
-    alice.group_tree.selection_set("group:net lab")
+    alice.group_rows["net lab"].click()
     alice.leave_group()
     check("R10 Leave closes alice's group tab", wait_until(root, lambda: "group:net lab" not in alice.rooms))
 
     # Closing a window updates everyone's user list
     bob.quit()
     check("R4  list updates when bob closes his window",
-          wait_until(root, lambda: alice.user_list.get(0, "end") == ("alice (you)", "carol")))
+          wait_until(root, lambda: user_texts(alice) == ["alice (you)", "carol"]))
 
     # Special 3: bob logs in again with the same name. His group tab reopens with its history,
     # and so does his private chat with alice when he opens it.
@@ -449,9 +451,8 @@ def main():
     bob = apps["bob"]
     check("S3  group tab reopens with its history after a reconnect",
           wait_until(root, lambda: "group:net lab" in bob.rooms and "hello group" in text_of(bob.rooms["group:net lab"])))
-    wait_until(root, lambda: "alice" in bob.users)
-    bob.user_list.selection_set(bob.users.index("alice"))
-    bob.on_user_double_click(None)
+    wait_until(root, lambda: "alice" in bob.user_rows)
+    bob.user_rows["alice"].open()
     check("S3  DM history survives a reconnect",
           wait_until(root, lambda: "new after reopen" in text_of(bob.rooms["dm:alice|bob"])))
     bob.quit()
